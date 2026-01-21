@@ -24,7 +24,7 @@ export function Login({ onLogin }: LoginProps) {
       onLogin();
     } catch (error: any) {
       console.error(error);
-      const msg = error.response?.data?.msg || "登录失败，请检查用户名或密码";
+      const msg = error.response?.data?.detail || error.response?.data?.msg || "登录失败，请检查用户名或密码";
       toast.error(msg);
     } finally {
       setLoading(false);

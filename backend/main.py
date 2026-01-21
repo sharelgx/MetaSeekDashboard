@@ -67,6 +67,10 @@ class ServerConfigRequest(BaseModel):
     password: str
     project_path: str
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 @app.get("/")
 async def root():
     return {"message": "Ops Dashboard API is running"}
@@ -114,8 +118,22 @@ async def get_profile():
     return {"user": "admin", "role": "admin"}
 
 @app.post("/api/login")
-async def login():
-    return {"success": True, "token": "dummy-token"}
+async def login(request: LoginRequest):
+    # 验证用户名和密码
+    if request.username == "root" and request.password == "123456":
+        return {
+            "success": True, 
+            "token": "admin-token",
+            "user": {
+                "username": "root",
+                "role": "admin"
+            }
+        }
+    else:
+        raise HTTPException(
+            status_code=401, 
+            detail="用户名或密码错误"
+        )
 
 @app.get("/api/logout")
 async def logout():
