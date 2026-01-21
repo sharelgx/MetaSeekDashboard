@@ -1,0 +1,87 @@
+# ============================================
+# MetaSeek Dashboard .gitignore
+# ============================================
+
+# ============ 环境变量和敏感信息 ============
+.env
+.env.*
+*.env
+.env.local
+.env.production
+.env.development
+cookies.txt
+tencent_cloud_key
+*.pem
+*.key
+*Zone.Identifier
+
+# ============ 数据库文件 ============
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+backup_*.sql
+
+# ============ 日志文件 ============
+logs/
+*.log
+*.log.*
+localhost-*.log
+nohup.out
+
+# ============ 临时文件和缓存 ============
+*.tmp
+*.temp
+*.cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# ============ IDE和编辑器文件 ============
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# ============ 系统文件 ============
+.DS_Store
+Thumbs.db
+*.pid
+
+# ============ Node.js ============
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+package-lock.json
+
+# ============ Python虚拟环境 ============
+venv/
+env/
+ENV/
+.venv/
+
+# ============ 构建输出 ============
+dist/
+build/
+*.egg-info/
+
+# ============ 备份文件 ============
+*.backup
+*.bak
+
+# ============ Git ============
+*.orig
+
+# ============ 其他 ============
+.pytest_cache/
+.coverage
+.nyc_output
+coverage/
