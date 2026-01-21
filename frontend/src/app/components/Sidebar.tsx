@@ -1,4 +1,4 @@
-import { LayoutDashboard, Rocket, Server, Database, FileText, Circle, LogOut } from 'lucide-react';
+import { LayoutDashboard, Rocket, Server, Database, FileText, LogOut, Settings } from 'lucide-react';
 import { cn } from '@/app/components/ui/utils';
 
 type NavigationItem = {
@@ -13,6 +13,7 @@ const navigationItems: NavigationItem[] = [
   { id: 'services', label: '服务管理', icon: Server },
   { id: 'backups', label: '版本快照', icon: Database },
   { id: 'logs', label: '日志监控', icon: FileText },
+  { id: 'settings', label: '设置', icon: Settings },
 ];
 
 interface SidebarProps {
@@ -56,16 +57,6 @@ export function Sidebar({ activePage, onNavigate, onLogout }: SidebarProps) {
 
       {/* Footer */}
       <div className="p-4 border-t border-slate-700 space-y-4">
-        {/* Connection Status */}
-        <div className="bg-slate-800 rounded-lg p-3">
-          <div className="flex items-center gap-2 mb-1">
-            <Circle className="w-2 h-2 fill-green-500 text-green-500" />
-            <span className="text-xs font-medium text-green-500">已连接</span>
-          </div>
-          <p className="text-xs text-slate-400">Tencent Cloud</p>
-          <p className="text-xs text-slate-400">Ubuntu 20.04 LTS</p>
-        </div>
-
         {/* Logout Button */}
         {onLogout && (
           <button

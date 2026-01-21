@@ -14,8 +14,11 @@ export interface ServerConfig {
   server_id?: string;
 }
 
-export async function fetchStatus() {
-  const response = await fetch(`${API_BASE_URL}/status`);
+export async function fetchStatus(serverId?: string) {
+  const url = serverId 
+    ? `${API_BASE_URL}/status?server_id=${encodeURIComponent(serverId)}`
+    : `${API_BASE_URL}/status`;
+  const response = await fetch(url);
   if (!response.ok) {
     throw new Error('Network response was not ok');
   }
@@ -96,5 +99,33 @@ export async function fixScratch() {
   const response = await fetch(`${API_BASE_URL}/fix/scratch`, {
     method: 'POST',
   });
+  return response.json();
+}
+
+export async function restartProject(serverId: string, startScript?: string) {
+  const response = await fetch(`${API_BASE_URL}/servers/${serverId}/restart-project`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ start_script: startScript }),
+  });
+  
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ detail: `HTTP ${response.status}: ${response.statusText}` }));
+    throw new Error(errorData.detail || errorData.message || `HTTP ${response.status}`);
+  }
+  
+  return response.json();
+}
+
+export async function getRestartLog(serverId: string, lines: number = 100) {
+  const response = await fetch(`${API_BASE_URL}/servers/${serverId}/restart-log?lines=${lines}`);
+  
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ detail: `HTTP ${response.status}: ${response.statusText}` }));
+    throw new Error(errorData.detail || errorData.message || `HTTP ${response.status}`);
+  }
+  
   return response.json();
 }

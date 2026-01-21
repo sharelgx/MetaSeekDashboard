@@ -7,6 +7,7 @@ import { Services } from '@/app/components/pages/Services';
 import { Backups } from '@/app/components/pages/Backups';
 import { Logs } from '@/app/components/pages/Logs';
 import { Login } from '@/app/components/pages/Login';
+import { Settings } from '@/app/components/pages/Settings';
 import api from '@/lib/api';
 import { toast } from "sonner";
 
@@ -68,6 +69,8 @@ export default function App() {
         return <Backups />;
       case 'logs':
         return <Logs />;
+      case 'settings':
+        return <Settings />;
       default:
         return <Dashboard />;
     }
