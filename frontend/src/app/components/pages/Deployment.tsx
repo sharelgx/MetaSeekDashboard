@@ -16,7 +16,6 @@ export function Deployment() {
   const [memoryLimit, setMemoryLimit] = useState('8');
   const [incrementalBuild, setIncrementalBuild] = useState(true);
   const [syncScope, setSyncScope] = useState('all');
-  const [autoBackup, setAutoBackup] = useState(true);
   const [filePath, setFilePath] = useState('');
   
   const [isBuilding, setIsBuilding] = useState(false);
@@ -205,15 +204,6 @@ export function Deployment() {
                   <SelectItem value="frontend">仅前端 (Frontend)</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <Label htmlFor="auto-backup">同步前自动备份</Label>
-              <Switch
-                id="auto-backup"
-                checked={autoBackup}
-                onCheckedChange={setAutoBackup}
-              />
             </div>
 
             <Button

@@ -4,7 +4,6 @@ import { Sidebar } from '@/app/components/Sidebar';
 import { Dashboard } from '@/app/components/pages/Dashboard';
 import { Deployment } from '@/app/components/pages/Deployment';
 import { Services } from '@/app/components/pages/Services';
-import { Backups } from '@/app/components/pages/Backups';
 import { Logs } from '@/app/components/pages/Logs';
 import { Login } from '@/app/components/pages/Login';
 import { Settings } from '@/app/components/pages/Settings';
@@ -65,8 +64,6 @@ export default function App() {
         return <Deployment />;
       case 'services':
         return <Services />;
-      case 'backups':
-        return <Backups />;
       case 'logs':
         return <Logs />;
       case 'settings':

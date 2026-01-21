@@ -85,3 +85,13 @@ build/
 .coverage
 .nyc_output
 coverage/
+
+# ============ 启动脚本（包含敏感信息） ============
+start.sh
+stop.sh
+check_health.sh
+backend/start_backend.sh
+backend/start_postgresql.sh
+backend/setup_database.sh
+backend/diagnose_database.sh
+nul

@@ -1,4 +1,4 @@
-import { LayoutDashboard, Rocket, Server, Database, FileText, LogOut, Settings } from 'lucide-react';
+import { LayoutDashboard, Rocket, Server, FileText, LogOut, Settings } from 'lucide-react';
 import { cn } from '@/app/components/ui/utils';
 
 type NavigationItem = {
@@ -11,7 +11,6 @@ const navigationItems: NavigationItem[] = [
   { id: 'dashboard', label: '概览', icon: LayoutDashboard },
   { id: 'deployment', label: '发布部署', icon: Rocket },
   { id: 'services', label: '服务管理', icon: Server },
-  { id: 'backups', label: '版本快照', icon: Database },
   { id: 'logs', label: '日志监控', icon: FileText },
   { id: 'settings', label: '设置', icon: Settings },
 ];
