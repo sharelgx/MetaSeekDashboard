@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import sys
 import os
 import json
+import re
+import subprocess
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
@@ -50,29 +52,104 @@ except ImportError as e:
                     session.close()
                 return {"servers": result}
             except Exception as e:
-                import traceback
                 print(f"Error listing servers: {e}")
-                print(traceback.format_exc())
                 return {"servers": {}}
         
-        def get_config(self, db: Session = None): 
-            """获取当前配置（兼容性方法）"""
-            return {}
+        def get_config(self):
+            """获取当前服务器的配置"""
+            if not self._current_server_id:
+                return {"error": "未选择服务器"}
+            
+            try:
+                session = self._get_db()
+                server = session.query(ServerConfig).filter(
+                    ServerConfig.server_id == self._current_server_id,
+                    ServerConfig.is_active == True
+                ).first()
+                
+                if server:
+                    return server.to_dict()
+                return {"error": "服务器不存在"}
+            except Exception as e:
+                print(f"Error getting config: {e}")
+                return {"error": str(e)}
+            finally:
+                if not self._db:
+                    session.close()
+        
+        def switch_server(self, server_id: str, db: Session = None):
+            """切换当前服务器"""
+            try:
+                session = db if db else self._get_db()
+                server = session.query(ServerConfig).filter(
+                    ServerConfig.server_id == server_id,
+                    ServerConfig.is_active == True
+                ).first()
+                
+                if not server:
+                    return {"success": False, "error": f"服务器 {server_id} 不存在"}
+                
+                self._current_server_id = server_id
+                return {"success": True, "message": f"已切换到服务器: {server.name}"}
+            except Exception as e:
+                print(f"Error switching server: {e}")
+                return {"success": False, "error": str(e)}
+            finally:
+                if not db:
+                    session.close()
+        
+        def save_server_config(self, server_id: str, config: dict, db: Session = None):
+            """保存服务器配置"""
+            try:
+                session = db if db else self._get_db()
+                server = session.query(ServerConfig).filter(ServerConfig.server_id == server_id).first()
+                
+                if server:
+                    # 更新现有配置
+                    for key, value in config.items():
+                        if hasattr(server, key):
+                            setattr(server, key, value)
+                else:
+                    # 创建新配置
+                    server = ServerConfig(server_id=server_id, **config)
+                    session.add(server)
+                
+                session.commit()
+                return {"success": True, "message": "配置已保存"}
+            except Exception as e:
+                session.rollback()
+                print(f"Error saving server config: {e}")
+                return {"success": False, "error": str(e)}
+            finally:
+                if not db:
+                    session.close()
+        
+        def delete_server_config(self, server_id: str, db: Session = None):
+            """删除服务器配置（软删除）"""
+            try:
+                session = db if db else self._get_db()
+                server = session.query(ServerConfig).filter(ServerConfig.server_id == server_id).first()
+                
+                if server:
+                    server.is_active = False
+                    session.commit()
+                    return {"success": True, "message": "配置已删除"}
+                return {"success": False, "error": "服务器不存在"}
+            except Exception as e:
+                session.rollback()
+                print(f"Error deleting server config: {e}")
+                return {"success": False, "error": str(e)}
+            finally:
+                if not db:
+                    session.close()
         
         def check_status(self, server_id: str = None, db: Session = None):
             """检查服务器状态"""
+            target_server_id = server_id or self._current_server_id
+            if not target_server_id:
+                return {"success": False, "error": "未指定服务器"}
+            
             try:
-                # 使用传入的 server_id 或当前选中的服务器
-                target_server_id = server_id or self._current_server_id
-                
-                if not target_server_id:
-                    return {
-                        "success": False,
-                        "error": "未选择服务器，请先选择或传入 server_id",
-                        "stdout": ""
-                    }
-                
-                # 获取服务器配置
                 session = db if db else self._get_db()
                 server = session.query(ServerConfig).filter(
                     ServerConfig.server_id == target_server_id,
@@ -80,24 +157,17 @@ except ImportError as e:
                 ).first()
                 
                 if not server:
-                    if not db:
-                        session.close()
-                    return {
-                        "success": False,
-                        "error": f"服务器 {target_server_id} 不存在",
-                        "stdout": ""
-                    }
+                    return {"success": False, "error": "服务器不存在"}
                 
-                # 准备SSH连接参数
+                # 连接SSH并检查状态
                 password = server.password if server.auth_type == "password" else None
                 private_key_path = server.private_key_path if server.auth_type == "key" else None
                 private_key_content = server.private_key_content if server.auth_type == "key" else None
                 
-                # 连接SSH
                 result = ssh_manager.connect(
                     host=server.host,
                     user=server.user,
-                    port=server.port,
+                    port=server.port or 22,
                     password=password,
                     private_key_path=private_key_path,
                     private_key_content=private_key_content,
@@ -105,263 +175,76 @@ except ImportError as e:
                 )
                 
                 if not result.get("success"):
-                    if not db:
-                        session.close()
-                    return {
-                        "success": False,
-                        "error": f"SSH连接失败: {result.get('message')}",
-                        "stdout": ""
-                    }
+                    return {"success": False, "error": f"SSH连接失败: {result.get('message')}"}
                 
-                try:
-                    # 执行状态检查命令
-                    # 检查进程、服务状态等，输出格式化的标记以便前端解析
-                    output_lines = []
-                    
-                    # 1. 检查 Django Backend 进程
-                    backend_cmd = "ps aux | grep -E 'python3.*manage.py.*runserver' | grep -v grep"
-                    backend_result = ssh_manager.execute_command(backend_cmd)
-                    if backend_result.get("stdout") and backend_result.get("stdout", "").strip():
-                        output_lines.append("Django Backend: python3 manage.py runserver [RUNNING]")
-                    else:
-                        output_lines.append("Django Backend: [STOPPED]")
-                    
-                    # 2. 检查 Nginx 服务状态
-                    nginx_cmd = "systemctl is-active nginx 2>&1"
-                    nginx_result = ssh_manager.execute_command(nginx_cmd)
-                    nginx_output = nginx_result.get("stdout", "").strip().lower()
-                    if nginx_output == "active":
-                        output_lines.append("Nginx: Active: active (running) [RUNNING]")
-                    else:
-                        output_lines.append("Nginx: [STOPPED]")
-                    
-                    # 3. 检查 API Health (支持8080和8086端口)
-                    api_ports = [8080, 8086]
-                    api_status = None
-                    for port in api_ports:
-                        api_cmd = f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{port}/api/website/ 2>&1"
-                        api_result = ssh_manager.execute_command(api_cmd)
-                        api_code = api_result.get("stdout", "").strip()
-                        if api_code == "200":
-                            output_lines.append(f"API Health: http://127.0.0.1:{port}/api/website/ -> 200 [OK]")
-                            api_status = "ok"
-                            break
-                    if not api_status:
-                        output_lines.append("API Health: [ERROR]")
-                    
-                    # 4. 检查 Scratch Editor
-                    scratch_cmd = "curl -s -o /dev/null -w '%{http_code}' http://metaseek.cc 2>&1"
-                    scratch_result = ssh_manager.execute_command(scratch_cmd)
-                    scratch_code = scratch_result.get("stdout", "").strip()
-                    if scratch_code == "200":
-                        output_lines.append("Scratch Editor: host=metaseek.cc -> 200 [OK]")
-                    elif scratch_code == "000" or "failed" in scratch_code.lower():
-                        output_lines.append("Scratch Editor: host=metaseek.cc -> 000 [STOPPED]")
-                    else:
-                        output_lines.append("Scratch Editor: host=metaseek.cc -> " + scratch_code + " [WARNING]")
-                    
-                    output = "\n".join(output_lines)
-                    
-                    return {
-                        "success": True,
-                        "stdout": output,
-                        "error": None
-                    }
-                finally:
-                    # 确保连接被关闭
-                    try:
-                        ssh_manager.close()
-                    except:
-                        pass
-                    if not db:
-                        session.close()
-                        
-            except Exception as e:
-                import traceback
-                error_msg = f"检查状态失败: {str(e)}"
-                print(error_msg)
-                print(traceback.format_exc())
-                try:
-                    ssh_manager.close()
-                except:
-                    pass
-                if db:
-                    try:
-                        session.rollback()
-                    except:
-                        pass
-                elif hasattr(self, '_get_db'):
-                    try:
-                        session = self._get_db()
-                        session.close()
-                    except:
-                        pass
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "stdout": ""
-                }
-        
-        def restart_services(self, service): 
-            return {"success": False}
-        
-        def sync_code(self, scope): 
-            return {"success": False}
-        
-        def build_react_frontend(self, **kwargs): 
-            return {"success": False}
-        
-        def build_vue_admin_frontend(self): 
-            return {"success": False}
-        
-        def ssh_exec(self, cmd): 
-            return {"success": False}
-        
-        def fix_scratch_editor(self): 
-            return {"success": False}
-        
-        def save_server_config(self, server_id: str, config: dict, db: Session = None):
-            """保存服务器配置到数据库"""
-            try:
-                session = db if db else self._get_db()
+                # 执行状态检查命令
+                status_command = f"cd {server.project_path} && bash -c 'source /dev/stdin <<< \"$(cat <<EOF\n$(curl -s https://raw.githubusercontent.com/MetaSeekOJ/MetaSeekOJ/main/scripts/check_status.sh 2>/dev/null || echo \"echo \\\"Status check script not available\\\"\")\nEOF\n)\" 2>/dev/null || echo \"Status check failed\"'"
                 
-                # 查找是否已存在
-                existing = session.query(ServerConfig).filter(ServerConfig.server_id == server_id).first()
+                # 简化版本：直接检查常见服务
+                check_commands = [
+                    "ps aux | grep -E '(python3.*manage.py|nginx|judge|heartbeat)' | grep -v grep || echo 'No services found'",
+                    "systemctl status nginx 2>&1 | head -3 || echo 'Nginx not found'",
+                    "curl -s http://localhost:8000/api/website/ 2>&1 | head -1 || echo 'API not responding'"
+                ]
                 
-                if existing:
-                    # 更新现有配置
-                    for key, value in config.items():
-                        # 跳过 server_id，因为它不应该被更新
-                        if key != 'server_id' and hasattr(existing, key):
-                            setattr(existing, key, value)
-                else:
-                    # 创建新配置
-                    # 从 config 中移除 server_id（如果存在），避免重复传递
-                    config_clean = {k: v for k, v in config.items() if k != 'server_id'}
-                    new_config = ServerConfig(server_id=server_id, **config_clean)
-                    session.add(new_config)
+                all_output = []
+                for cmd in check_commands:
+                    exec_result = ssh_manager.execute_command(f"cd {server.project_path} && {cmd}")
+                    if exec_result.get("success"):
+                        all_output.append(exec_result.get("stdout", ""))
                 
-                session.commit()
-                
-                if not db:
-                    session.close()
+                ssh_manager.close()
                 
                 return {
                     "success": True,
-                    "message": f"服务器配置 {server_id} 已保存",
-                    "server_id": server_id
+                    "stdout": "\n".join(all_output),
+                    "server_id": target_server_id
                 }
             except Exception as e:
                 import traceback
-                error_msg = f"保存配置失败: {str(e)}"
-                print(error_msg)
+                print(f"Error checking status: {e}")
                 print(traceback.format_exc())
-                if db:
-                    session.rollback()
-                elif hasattr(self, '_get_db'):
-                    try:
-                        session = self._get_db()
-                        session.rollback()
-                        session.close()
-                    except:
-                        pass
-                return {
-                    "success": False,
-                    "error": error_msg
-                }
-        
-        def delete_server_config(self, server_id: str, db: Session = None):
-            """删除服务器配置（软删除：设置 is_active=False）"""
-            try:
-                session = db if db else self._get_db()
-                
-                server = session.query(ServerConfig).filter(
-                    ServerConfig.server_id == server_id,
-                    ServerConfig.is_active == True
-                ).first()
-                
-                if server:
-                    server.is_active = False
-                    session.commit()
-                    
-                    if not db:
-                        session.close()
-                    
-                    return {
-                        "success": True,
-                        "message": f"服务器配置 {server_id} 已删除"
-                    }
-                else:
-                    if not db:
-                        session.close()
-                    return {
-                        "success": False,
-                        "error": f"服务器配置 {server_id} 不存在"
-                    }
-            except Exception as e:
-                import traceback
-                error_msg = f"删除配置失败: {str(e)}"
-                print(error_msg)
-                print(traceback.format_exc())
-                if db:
-                    session.rollback()
-                elif hasattr(self, '_get_db'):
-                    try:
-                        session = self._get_db()
-                        session.rollback()
-                        session.close()
-                    except:
-                        pass
-                return {
-                    "success": False,
-                    "error": error_msg
-                }
-        
-        def switch_server(self, server_id: str, db: Session = None):
-            """切换当前服务器（验证服务器是否存在）"""
-            try:
-                session = db if db else self._get_db()
-                server = session.query(ServerConfig).filter(
-                    ServerConfig.server_id == server_id,
-                    ServerConfig.is_active == True
-                ).first()
-                
+                return {"success": False, "error": str(e)}
+            finally:
                 if not db:
-                    session.close()
-                
-                if server:
-                    # 保存当前服务器ID
-                    self._current_server_id = server_id
-                    return {
-                        "success": True,
-                        "message": f"已切换到服务器 {server_id}"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": f"服务器 {server_id} 不存在"
-                    }
-            except Exception as e:
-                import traceback
-                error_msg = f"切换服务器失败: {str(e)}"
-                print(error_msg)
-                print(traceback.format_exc())
-                if db:
-                    session.rollback()
-                elif hasattr(self, '_get_db'):
                     try:
-                        session = self._get_db()
                         session.close()
                     except:
                         pass
-                return {
-                    "success": False,
-                    "error": error_msg
-                }
+        
+        def sync_code(self, scope: str):
+            """同步代码（占位实现）"""
+            return {"success": False, "error": "功能未实现"}
+        
+        def build_react_frontend(self, memory_limit: int = 8192, incremental: bool = True):
+            """构建React前端（占位实现）"""
+            return {"success": False, "error": "功能未实现"}
+        
+        def build_vue_admin_frontend(self):
+            """构建Vue管理后台（占位实现）"""
+            return {"success": False, "error": "功能未实现"}
+        
+        def restart_services(self, service: str):
+            """重启服务（占位实现）"""
+            return {"success": False, "error": "功能未实现"}
+        
+        def fix_scratch_editor(self):
+            """修复Scratch编辑器（占位实现）"""
+            return {"success": False, "error": "功能未实现"}
+        
+        def ssh_exec(self, command: str):
+            """执行SSH命令（占位实现）"""
+            return {"success": False, "error": "功能未实现"}
 
-app = FastAPI()
+# 初始化数据库表
+Base.metadata.create_all(bind=engine)
 
-# Configure CORS
+# 初始化MCP实例
+# 使用数据库存储，每次请求时传入数据库会话
+mcp = CodeSyncMCP()
+
+app = FastAPI(title="Ops Dashboard API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # For dev, allow all. In prod, specific origins.
@@ -370,82 +253,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize MCP instance
-# 使用数据库存储，每次请求时传入数据库会话
-mcp = CodeSyncMCP()
-
-# 确保数据库表已创建
-try:
-    from database import check_database_connection
-    if check_database_connection():
-        Base.metadata.create_all(bind=engine)
-        print("✅ 数据库表已初始化")
-    else:
-        print("⚠️  数据库连接失败，请先配置 PostgreSQL（见 POSTGRESQL_SETUP.md）")
-except Exception as e:
-    print(f"⚠️  数据库初始化警告: {e}")
-    print("请检查 PostgreSQL 是否已启动并正确配置")
-
-class CommandRequest(BaseModel):
-    command: str
+# Request models
+class ServerConfigRequest(BaseModel):
+    server_id: str
+    name: str
+    host: str
+    user: str
+    port: Optional[int] = 22
+    auth_type: str = "password"  # "password" or "key"
+    password: Optional[str] = None
+    private_key_path: Optional[str] = None
+    private_key_content: Optional[str] = None
+    project_path: str
+    start_script: Optional[str] = None
 
 class SyncRequest(BaseModel):
     scope: str
 
 class BuildRequest(BaseModel):
-    type: str # 'react' or 'vue'
+    type: str  # "react" or "vue"
     memory_limit: Optional[int] = 8192
     incremental: Optional[bool] = True
 
 class RestartRequest(BaseModel):
     service: str
 
+class CommandRequest(BaseModel):
+    command: str
+
 class RestartProjectRequest(BaseModel):
     start_script: Optional[str] = None
-
-class ServerConfigRequest(BaseModel):
-    server_id: str = Field(..., min_length=1, description="服务器ID")
-    name: str = Field(..., min_length=1, description="服务器名称")
-    host: str = Field(..., min_length=1, description="IP地址")
-    user: str = Field(..., min_length=1, description="用户名")
-    port: Optional[int] = Field(default=22, ge=1, le=65535, description="端口")
-    password: Optional[str] = Field(default=None, description="SSH密码")
-    private_key_path: Optional[str] = Field(default=None, description="私钥文件路径")
-    private_key_content: Optional[str] = Field(default=None, description="私钥内容")
-    project_path: str = Field(..., min_length=1, description="项目路径")
-    auth_type: Optional[str] = Field(default="password", description="认证类型: password 或 key")
-    start_script: Optional[str] = Field(default=None, description="启动脚本路径（可选，用于重启项目）")
-    
-    @field_validator('server_id', 'name', 'host', 'user', 'project_path')
-    @classmethod
-    def validate_not_empty(cls, v: str) -> str:
-        if isinstance(v, str) and not v.strip():
-            raise ValueError('字段不能为空')
-        return v.strip() if isinstance(v, str) else v
-    
-    @field_validator('auth_type')
-    @classmethod
-    def validate_auth_type(cls, v: Optional[str]) -> str:
-        if v not in ['password', 'key']:
-            raise ValueError('auth_type 必须是 "password" 或 "key"')
-        return v
-    
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "server_id": "test_server",
-                    "name": "测试服务器",
-                    "host": "192.168.1.100",
-                    "user": "ubuntu",
-                    "port": 22,
-                    "project_path": "/home/ubuntu/MetaSeekOJ",
-                    "auth_type": "password",
-                    "password": "your_password"
-                }
-            ]
-        }
-    }
 
 class BrowsePathRequest(ServerConfigRequest):
     path: Optional[str] = Field(default="/", description="要浏览的路径")
@@ -453,6 +290,16 @@ class BrowsePathRequest(ServerConfigRequest):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+# 解析启动脚本的请求模型
+class ParseScriptRequest(BaseModel):
+    script_path: Optional[str] = None  # 如果为空，使用服务器配置中的start_script
+
+# 服务操作请求模型
+class ServiceOperationRequest(BaseModel):
+    service_name: str
+    operation: str  # "start", "stop", "restart", "status"
+    script_path: Optional[str] = None
 
 @app.get("/")
 async def root():
@@ -962,6 +809,573 @@ async def fetch_logs(request: CommandRequest):
         return {"success": False, "error": "Command not allowed or file not permitted"}
         
     return mcp.ssh_exec(request.command)
+
+@app.get("/api/health/postgresql")
+async def health_check_postgresql():
+    """检查PostgreSQL服务状态"""
+    try:
+        from database import check_database_connection
+        if check_database_connection():
+            return {"status": "running", "service": "postgresql"}
+        else:
+            return {"status": "error", "service": "postgresql", "message": "数据库连接失败"}
+    except Exception as e:
+        return {"status": "error", "service": "postgresql", "message": str(e)}
+
+# 解析启动脚本，提取服务和依赖
+def parse_start_script(script_content: str) -> Dict[str, Any]:
+    """
+    解析启动脚本，提取服务和依赖信息
+    返回格式：
+    {
+        "services": [
+            {"name": "PostgreSQL", "type": "dependency", "start_command": "...", "stop_command": "...", "check_command": "..."},
+            {"name": "Backend", "type": "service", "start_command": "...", "stop_command": "...", "check_command": "..."}
+        ],
+        "dependencies": [...]
+    }
+    """
+    services = []
+    dependencies = []
+    
+    # 解析函数定义
+    function_pattern = r'^(\w+)\(\)\s*\{'
+    functions = {}
+    current_function = None
+    current_content = []
+    
+    lines = script_content.split('\n')
+    for i, line in enumerate(lines):
+        func_match = re.match(function_pattern, line.strip())
+        if func_match:
+            if current_function:
+                functions[current_function] = '\n'.join(current_content)
+            current_function = func_match.group(1)
+            current_content = []
+        elif current_function:
+            current_content.append(line)
+    
+    if current_function:
+        functions[current_function] = '\n'.join(current_content)
+    
+    # 识别服务和依赖
+    service_keywords = {
+        'postgresql': {'name': 'PostgreSQL', 'type': 'dependency'},
+        'backend': {'name': 'Backend', 'type': 'service'},
+        'frontend': {'name': 'Frontend', 'type': 'service'},
+        'nginx': {'name': 'Nginx', 'type': 'service'},
+        'judge': {'name': 'Judge Server', 'type': 'service'},
+        'heartbeat': {'name': 'Heartbeat Monitor', 'type': 'service'},
+        'scratch': {'name': 'Scratch Runner', 'type': 'service'},
+    }
+    
+    for func_name, func_content in functions.items():
+        func_lower = func_name.lower()
+        for keyword, info in service_keywords.items():
+            if keyword in func_lower:
+                # 提取启动命令
+                start_patterns = [
+                    r'(nohup\s+[^\n&]+)',
+                    r'(python3\s+[^\n&]+)',
+                    r'(npm\s+run\s+[^\n&]+)',
+                    r'(service\s+\w+\s+start)',
+                    r'(sudo\s+service\s+\w+\s+start)',
+                ]
+                
+                start_command = None
+                for pattern in start_patterns:
+                    match = re.search(pattern, func_content, re.MULTILINE)
+                    if match:
+                        start_command = match.group(1).strip()
+                        break
+                
+                # 提取检查命令
+                check_patterns = [
+                    r'(pg_isready[^\n]+)',
+                    r'(curl\s+[^\n]+)',
+                    r'(ps\s+aux\s+\|\s+grep[^\n]+)',
+                    r'(check_port\s+\d+)',
+                ]
+                
+                check_command = None
+                for pattern in check_patterns:
+                    match = re.search(pattern, func_content, re.MULTILINE)
+                    if match:
+                        check_command = match.group(1).strip()
+                        break
+                
+                service_info = {
+                    "name": info['name'],
+                    "type": info['type'],
+                    "function_name": func_name,
+                    "start_command": start_command,
+                    "check_command": check_command,
+                }
+                
+                if info['type'] == 'dependency':
+                    dependencies.append(service_info)
+                else:
+                    services.append(service_info)
+                break
+    
+    return {
+        "services": services,
+        "dependencies": dependencies,
+        "functions": list(functions.keys())
+    }
+
+@app.post("/api/servers/{server_id}/parse-script")
+async def parse_script(server_id: str, request: Optional[ParseScriptRequest] = None, db: Session = Depends(get_db)):
+    """
+    解析指定服务器的启动脚本，提取服务和依赖信息
+    """
+    try:
+        servers_result = mcp.list_servers(db=db)
+        servers = servers_result.get("servers", {})
+        
+        if server_id not in servers:
+            raise HTTPException(status_code=404, detail=f"服务器 {server_id} 不存在")
+        
+        server_config = servers[server_id]
+        
+        # 获取启动脚本路径
+        script_path = None
+        if request and request.script_path:
+            script_path = request.script_path
+        elif server_config.get("start_script"):
+            script_path = server_config.get("start_script")
+        else:
+            raise HTTPException(status_code=400, detail="未指定启动脚本路径")
+        
+        project_path = server_config.get("project_path", "")
+        
+        # 连接SSH并读取脚本内容
+        password = server_config.get("password") if server_config.get("auth_type") == "password" else None
+        private_key_path = server_config.get("private_key_path") if server_config.get("auth_type") == "key" else None
+        private_key_content = server_config.get("private_key_content") if server_config.get("auth_type") == "key" else None
+        
+        result = ssh_manager.connect(
+            host=server_config.get("host"),
+            user=server_config.get("user"),
+            port=server_config.get("port", 22),
+            password=password,
+            private_key_path=private_key_path,
+            private_key_content=private_key_content,
+            timeout=10
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=f"SSH连接失败: {result.get('message')}")
+        
+        # 读取脚本内容
+        read_command = f"cat '{script_path}' 2>/dev/null || echo 'SCRIPT_NOT_FOUND'"
+        exec_result = ssh_manager.execute_command(read_command)
+        ssh_manager.close()
+        
+        if not exec_result.get("success") or "SCRIPT_NOT_FOUND" in exec_result.get("stdout", ""):
+            raise HTTPException(status_code=404, detail=f"启动脚本不存在: {script_path}")
+        
+        script_content = exec_result.get("stdout", "")
+        
+        # 解析脚本
+        parsed = parse_start_script(script_content)
+        
+        return {
+            "success": True,
+            "script_path": script_path,
+            "parsed": parsed
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Error parsing script: {e}")
+        print(f"Traceback: {error_trace}")
+        raise HTTPException(status_code=500, detail=f"解析启动脚本失败: {str(e)}")
+
+@app.post("/api/servers/{server_id}/service-operation")
+async def service_operation_endpoint(server_id: str, request: ServiceOperationRequest, db: Session = Depends(get_db)):
+    """
+    对指定服务器的服务执行操作（启动、停止、重启、状态检查）
+    """
+    try:
+        servers_result = mcp.list_servers(db=db)
+        servers = servers_result.get("servers", {})
+        
+        if server_id not in servers:
+            raise HTTPException(status_code=404, detail=f"服务器 {server_id} 不存在")
+        
+        server_config = servers[server_id]
+        project_path = server_config.get("project_path", "")
+        
+        # 连接SSH
+        password = server_config.get("password") if server_config.get("auth_type") == "password" else None
+        private_key_path = server_config.get("private_key_path") if server_config.get("auth_type") == "key" else None
+        private_key_content = server_config.get("private_key_content") if server_config.get("auth_type") == "key" else None
+        
+        result = ssh_manager.connect(
+            host=server_config.get("host"),
+            user=server_config.get("user"),
+            port=server_config.get("port", 22),
+            password=password,
+            private_key_path=private_key_path,
+            private_key_content=private_key_content,
+            timeout=10
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=f"SSH连接失败: {result.get('message')}")
+        
+        # 根据操作类型执行相应命令
+        operation = request.operation.lower()
+        service_name = request.service_name
+        
+        # 构建命令（根据服务名称和操作类型）
+        command = None
+        
+        if operation == "status":
+            # 健康检查
+            if "postgresql" in service_name.lower():
+                command = "pg_isready -h localhost -p 5432"
+            elif "backend" in service_name.lower() or "django" in service_name.lower():
+                command = "ps aux | grep -E 'python3.*manage.py|python3.*main.py' | grep -v grep || echo 'NOT_RUNNING'"
+            elif "nginx" in service_name.lower():
+                command = "systemctl status nginx 2>&1 | head -3 || service nginx status 2>&1 | head -3"
+            elif "judge" in service_name.lower():
+                command = "ps aux | grep -E 'judge|dramatiq' | grep -v grep || echo 'NOT_RUNNING'"
+            elif "frontend" in service_name.lower() or "vite" in service_name.lower():
+                command = "ps aux | grep -E 'vite|npm.*dev' | grep -v grep || echo 'NOT_RUNNING'"
+            else:
+                command = f"ps aux | grep -i '{service_name}' | grep -v grep || echo 'NOT_RUNNING'"
+        
+        elif operation == "start":
+            # 启动服务
+            if "postgresql" in service_name.lower():
+                command = "sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start"
+            elif "backend" in service_name.lower() or "django" in service_name.lower():
+                command = f"cd {project_path} && nohup python3 manage.py runserver 0.0.0.0:8000 > /tmp/backend.log 2>&1 &"
+            elif "nginx" in service_name.lower():
+                command = "sudo service nginx start"
+            elif "judge" in service_name.lower():
+                command = f"cd {project_path} && nohup python3 -m dramatiq judge 2>&1 &"
+            elif "frontend" in service_name.lower() or "vite" in service_name.lower():
+                command = f"cd {project_path}/frontend && nohup npm run dev > /tmp/frontend.log 2>&1 &"
+            else:
+                # 尝试从启动脚本中查找对应的启动函数
+                command = f"cd {project_path} && bash -c 'source start.sh && {service_name.lower()}_start()' 2>&1 || echo 'SERVICE_NOT_FOUND'"
+        
+        elif operation == "stop":
+            # 停止服务
+            if "postgresql" in service_name.lower():
+                command = "sudo service postgresql stop"
+            elif "backend" in service_name.lower() or "django" in service_name.lower():
+                command = "pkill -f 'python3.*manage.py|python3.*main.py'"
+            elif "nginx" in service_name.lower():
+                command = "sudo service nginx stop"
+            elif "judge" in service_name.lower():
+                command = "pkill -f 'dramatiq|judge'"
+            elif "frontend" in service_name.lower() or "vite" in service_name.lower():
+                command = "pkill -f 'vite|npm.*dev'"
+            else:
+                command = f"pkill -f -i '{service_name}'"
+        
+        elif operation == "restart":
+            # 重启服务（先停止再启动）
+            if "postgresql" in service_name.lower():
+                command = "sudo service postgresql restart"
+            elif "backend" in service_name.lower() or "django" in service_name.lower():
+                command = f"pkill -f 'python3.*manage.py|python3.*main.py'; sleep 1; cd {project_path} && nohup python3 manage.py runserver 0.0.0.0:8000 > /tmp/backend.log 2>&1 &"
+            elif "nginx" in service_name.lower():
+                command = "sudo service nginx restart"
+            elif "judge" in service_name.lower():
+                command = f"pkill -f 'dramatiq|judge'; sleep 1; cd {project_path} && nohup python3 -m dramatiq judge 2>&1 &"
+            elif "frontend" in service_name.lower() or "vite" in service_name.lower():
+                command = f"pkill -f 'vite|npm.*dev'; sleep 1; cd {project_path}/frontend && nohup npm run dev > /tmp/frontend.log 2>&1 &"
+            else:
+                command = f"pkill -f -i '{service_name}'; sleep 2; cd {project_path} && bash start.sh"
+        
+        if not command:
+            raise HTTPException(status_code=400, detail=f"不支持的操作: {operation}")
+        
+        # 执行命令
+        exec_result = ssh_manager.execute_command(f"cd {project_path} && {command}")
+        ssh_manager.close()
+        
+        # 解析结果
+        stdout = exec_result.get("stdout", "")
+        stderr = exec_result.get("stderr", "")
+        success = exec_result.get("success", False)
+        
+        # 判断服务状态
+        status = "unknown"
+        if operation == "status":
+            if "NOT_RUNNING" in stdout or "inactive" in stdout.lower() or "stopped" in stdout.lower():
+                status = "stopped"
+            elif "running" in stdout.lower() or "active" in stdout.lower() or exec_result.get("exit_status") == 0:
+                status = "running"
+            else:
+                status = "error"
+        elif operation in ["start", "stop", "restart"]:
+            if success:
+                status = "running" if operation in ["start", "restart"] else "stopped"
+            else:
+                status = "error"
+        
+        return {
+            "success": success,
+            "operation": operation,
+            "service_name": service_name,
+            "status": status,
+            "output": stdout,
+            "error": stderr if not success else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Error performing service operation: {e}")
+        print(f"Traceback: {error_trace}")
+        raise HTTPException(status_code=500, detail=f"执行服务操作失败: {str(e)}")
+
+# 本地服务操作请求模型
+class LocalServiceStatusRequest(BaseModel):
+    service_id: str
+    check_command: str
+    port: Optional[int] = None
+
+class LocalServiceOperationRequest(BaseModel):
+    service_id: str
+    operation: str  # "start", "stop", "restart"
+    command: str
+
+@app.post("/api/services/local/status")
+async def local_service_status(request: LocalServiceStatusRequest):
+    """
+    检查本地服务状态
+    """
+    import subprocess
+    import shlex
+    
+    try:
+        service_id = request.service_id
+        check_command = request.check_command
+        port = request.port
+        
+        status = "stopped"
+        
+        # 如果有端口，先检查端口
+        if port:
+            try:
+                result = subprocess.run(
+                    ["ss", "-tlnp"], 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=5
+                )
+                if f":{port} " in result.stdout or f":{port} " in result.stderr:
+                    status = "running"
+                else:
+                    # 尝试使用netstat
+                    result = subprocess.run(
+                        ["netstat", "-tlnp"], 
+                        capture_output=True, 
+                        text=True, 
+                        timeout=5
+                    )
+                    if f":{port} " in result.stdout or f":{port} " in result.stderr:
+                        status = "running"
+            except:
+                pass
+        
+        # 执行检查命令
+        if check_command:
+            try:
+                # 使用shell执行命令
+                result = subprocess.run(
+                    check_command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                # 根据命令输出判断状态
+                output = result.stdout + result.stderr
+                if "NOT_RUNNING" in output or result.returncode != 0:
+                    if status != "running":  # 如果端口检查也没通过
+                        status = "stopped"
+                else:
+                    # 检查命令成功，说明服务在运行
+                    if "postgresql" in service_id.lower() or "postgres" in service_id.lower():
+                        # PostgreSQL特殊处理
+                        if "accepting connections" in output.lower() or result.returncode == 0:
+                            status = "running"
+                    else:
+                        # 其他服务，如果命令有输出且不是NOT_RUNNING，说明在运行
+                        if output.strip() and "NOT_RUNNING" not in output:
+                            status = "running"
+            except Exception as e:
+                print(f"执行检查命令失败: {e}")
+                status = "error"
+        
+        return {
+            "success": True,
+            "service_id": service_id,
+            "status": status
+        }
+        
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Error checking local service status: {e}")
+        print(f"Traceback: {error_trace}")
+        return {
+            "success": False,
+            "error": str(e),
+            "status": "error"
+        }
+
+@app.post("/api/services/local/operation")
+async def local_service_operation(request: LocalServiceOperationRequest):
+    """
+    执行本地服务操作（启动、停止、重启）
+    """
+    import subprocess
+    import os
+    
+    try:
+        service_id = request.service_id
+        operation = request.operation
+        command = request.command
+        
+        # 获取项目根目录
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        
+        # 切换到项目目录执行命令
+        if operation == "start":
+            # 启动服务：在后台运行
+            if "postgresql" in service_id.lower():
+                # PostgreSQL需要sudo
+                full_command = f"cd {project_root} && echo '123456' | sudo -S {command}"
+            else:
+                full_command = f"cd {project_root} && {command}"
+            
+            # 使用nohup在后台执行
+            process = subprocess.Popen(
+                full_command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+            )
+            
+            # 等待一下看是否启动成功
+            import time
+            time.sleep(2)
+            
+            # 检查进程是否还在运行
+            if process.poll() is None:
+                return {
+                    "success": True,
+                    "message": f"{service_id} 启动命令已执行",
+                    "pid": process.pid
+                }
+            else:
+                # 进程已退出，可能启动失败
+                stdout, stderr = process.communicate()
+                return {
+                    "success": False,
+                    "error": f"启动失败: {stderr.decode() if stderr else stdout.decode()}"
+                }
+        
+        elif operation == "stop":
+            # 停止服务：直接执行停止命令
+            if "postgresql" in service_id.lower():
+                full_command = f"cd {project_root} && echo '123456' | sudo -S {command}"
+            else:
+                full_command = f"cd {project_root} && {command}"
+            
+            result = subprocess.run(
+                full_command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "message": f"{service_id} 已停止"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": result.stderr or result.stdout or "停止失败"
+                }
+        
+        elif operation == "restart":
+            # 重启服务：先停止再启动
+            # 停止
+            if "postgresql" in service_id.lower():
+                stop_cmd = f"cd {project_root} && echo '123456' | sudo -S {command.split(';')[0]}"
+            else:
+                stop_cmd = f"cd {project_root} && {command.split(';')[0]}"
+            
+            subprocess.run(stop_cmd, shell=True, capture_output=True, timeout=10)
+            
+            # 等待
+            import time
+            time.sleep(1)
+            
+            # 启动
+            if "postgresql" in service_id.lower():
+                start_cmd = f"cd {project_root} && echo '123456' | sudo -S {command.split(';')[1].strip()}"
+            else:
+                start_cmd = f"cd {project_root} && {command.split(';')[1].strip()}"
+            
+            process = subprocess.Popen(
+                start_cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+            )
+            
+            time.sleep(2)
+            
+            if process.poll() is None:
+                return {
+                    "success": True,
+                    "message": f"{service_id} 重启成功",
+                    "pid": process.pid
+                }
+            else:
+                stdout, stderr = process.communicate()
+                return {
+                    "success": False,
+                    "error": f"重启失败: {stderr.decode() if stderr else stdout.decode()}"
+                }
+        
+        else:
+            return {
+                "success": False,
+                "error": f"不支持的操作: {operation}"
+            }
+            
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Error performing local service operation: {e}")
+        print(f"Traceback: {error_trace}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn

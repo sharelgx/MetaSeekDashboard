@@ -1,150 +1,337 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/app/components/ui/card';
 import { Button } from '@/app/components/ui/button';
 import { StatusBadge, ServiceStatus } from '@/app/components/StatusBadge';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/app/components/ui/select';
 import { toast } from 'sonner';
-import { RotateCw, Square, Activity, Wrench, Loader2 } from 'lucide-react';
-import { restartService, fixScratch, fetchStatus } from '@/app/components/ui/api';
+import { RotateCw, Square, Activity, Loader2, Play, Database, Package, Server, RefreshCw } from 'lucide-react';
+import { fetchServers, switchServer, serviceOperation } from '@/app/components/ui/api';
 
-interface Service {
+// 根据启动脚本写死的服务列表
+interface ServiceItem {
   id: string;
   name: string;
   description: string;
+  type: 'dependency' | 'service';
+  port?: number;
+  checkCommand: string;
+  startCommand: string;
+  stopCommand: string;
   status: ServiceStatus;
-  group: 'core' | 'judge' | 'auxiliary';
+  loading?: boolean;
 }
 
-interface QuickFix {
-  id: string;
+interface ServerConfig {
+  server_id: string;
   name: string;
-  description: string;
-  icon: React.ComponentType<{ className?: string }>;
+  host: string;
+  user: string;
+  project_path: string;
+  start_script?: string;
 }
 
-const initialServices: Service[] = [
-  { id: 'backend', name: 'Django Backend', description: 'API 服务', status: 'running', group: 'core' },
-  { id: 'nginx', name: 'Nginx', description: 'Web 服务器', status: 'running', group: 'core' },
-  { id: 'judge', name: 'Judge Server', description: '判题服务', status: 'running', group: 'judge' },
-  { id: 'heartbeat', name: 'Heartbeat Monitor', description: '心跳监控', status: 'running', group: 'judge' },
-  { id: 'scratch', name: 'Scratch Runner', description: 'Scratch 编辑器', status: 'running', group: 'auxiliary' },
+// 系统依赖（从启动脚本提取）
+const dependencies: Omit<ServiceItem, 'status' | 'loading'>[] = [
+  {
+    id: 'postgresql',
+    name: 'PostgreSQL',
+    description: '数据库服务',
+    type: 'dependency',
+    port: 5432,
+    checkCommand: 'pg_isready -h localhost -p 5432',
+    startCommand: 'sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start',
+    stopCommand: 'sudo service postgresql stop',
+  },
 ];
 
-const quickFixes: QuickFix[] = [
-  { id: 'fix-scratch', name: '修复 Scratch 编辑器', description: '当编辑器无法访问时使用', icon: Wrench },
-  { id: 'fix-judge', name: '修复判题服务', description: '重置判题队列并重启服务', icon: Wrench },
-  { id: 'clear-cache', name: '清除缓存', description: '清除 Redis 缓存', icon: Wrench },
+// 应用服务（从启动脚本提取）
+const services: Omit<ServiceItem, 'status' | 'loading'>[] = [
+  {
+    id: 'backend',
+    name: 'Backend',
+    description: 'FastAPI 后端服务',
+    type: 'service',
+    port: 8000,
+    checkCommand: 'ps aux | grep -E "python3.*main.py" | grep -v grep || echo "NOT_RUNNING"',
+    startCommand: 'cd backend && nohup python3 main.py > /tmp/opsdashboard_backend.log 2>&1 &',
+    stopCommand: 'pkill -f "python3.*main.py"',
+  },
+  {
+    id: 'frontend',
+    name: 'Frontend',
+    description: 'Vite 前端服务',
+    type: 'service',
+    port: 5173,
+    checkCommand: 'ps aux | grep -E "vite|npm.*dev" | grep -v grep || echo "NOT_RUNNING"',
+    startCommand: 'cd frontend && nohup npm run dev > /tmp/opsdashboard_frontend.log 2>&1 &',
+    stopCommand: 'pkill -f "vite|npm.*dev"',
+  },
 ];
 
 export function Services() {
-  const [services, setServices] = useState<Service[]>(initialServices);
-  const [loadingService, setLoadingService] = useState<string | null>(null);
+  const [servers, setServers] = useState<Record<string, ServerConfig>>({});
+  const [currentServerId, setCurrentServerId] = useState<string | null>(null);
+  const [serviceList, setServiceList] = useState<ServiceItem[]>([]);
+  const [dependencyList, setDependencyList] = useState<ServiceItem[]>([]);
+  const [loadingOperations, setLoadingOperations] = useState<Record<string, string>>({});
+  const [loadingServers, setLoadingServers] = useState(false);
 
-  const handleRestart = async (serviceId: string) => {
-    setLoadingService(serviceId);
-    toast.info(`正在重启 ${services.find(s => s.id === serviceId)?.name}...`);
-    
+  // 加载服务器列表
+  useEffect(() => {
+    loadServers();
+  }, []);
+
+  // 初始化服务列表（当服务器切换时）
+  useEffect(() => {
+    if (currentServerId) {
+      initServices();
+    }
+  }, [currentServerId]);
+
+  const loadServers = async () => {
     try {
-        const res = await restartService(serviceId);
-        if (res.restarted || res.success) {
-            toast.success(`${services.find(s => s.id === serviceId)?.name} 重启成功`);
-        } else {
-            toast.error(`重启失败: ${res.error || '未知错误'}`);
+      const response = await fetchServers();
+      if (response && response.servers) {
+        setServers(response.servers);
+        
+        // 如果有服务器且未选择，选择第一个
+        const serverIds = Object.keys(response.servers);
+        if (serverIds.length > 0 && !currentServerId) {
+          setCurrentServerId(serverIds[0]);
+          await handleSwitchServer(serverIds[0]);
         }
-    } catch (e) {
-        toast.error(`重启请求失败: ${e}`);
-    } finally {
-        setLoadingService(null);
+      }
+    } catch (error) {
+      console.error('加载服务器列表失败:', error);
+      toast.error('加载服务器列表失败');
     }
   };
 
-  const handleStop = async (serviceId: string) => {
-    toast.warning("停止服务功能暂未开放");
-  };
-
-  const handleCheckStatus = async (serviceId: string) => {
-    toast.info("正在获取最新状态...");
-    const res = await fetchStatus();
-    if (res.success) {
-        toast.success("状态已更新 (请查看仪表盘详情)");
-        // In a real app we would parse specific service status here
-    } else {
-        toast.error("获取状态失败");
-    }
-  };
-
-  const handleQuickFix = async (fixId: string) => {
-    const fix = quickFixes.find(f => f.id === fixId);
-    toast.info(`正在执行: ${fix?.name}...`);
+  const initServices = () => {
+    const servicesWithStatus: ServiceItem[] = services.map(s => ({
+      ...s,
+      status: 'warning' as ServiceStatus,
+      loading: false,
+    }));
     
-    if (fixId === 'fix-scratch') {
-        try {
-            const res = await fixScratch();
-            if (res.success) {
-                toast.success("修复脚本执行成功");
-            } else {
-                toast.error(`修复失败: ${res.error}`);
-            }
-        } catch (e) {
-            toast.error(`请求失败: ${e}`);
-        }
-    } else {
-        toast.info("该修复功能尚未实现后端对接");
+    const depsWithStatus: ServiceItem[] = dependencies.map(d => ({
+      ...d,
+      status: 'warning' as ServiceStatus,
+      loading: false,
+    }));
+    
+    setServiceList(servicesWithStatus);
+    setDependencyList(depsWithStatus);
+    
+    // 自动检查所有服务状态
+    checkAllServicesStatus([...servicesWithStatus, ...depsWithStatus]);
+  };
+
+  // 切换服务器
+  const handleSwitchServer = async (serverId: string) => {
+    if (serverId === currentServerId) return;
+
+    setLoadingServers(true);
+    try {
+      await switchServer(serverId);
+      setCurrentServerId(serverId);
+      toast.success(`已切换到服务器: ${servers[serverId]?.name || serverId}`);
+      initServices();
+    } catch (error: any) {
+      toast.error(`切换服务器失败: ${error.message}`);
+    } finally {
+      setLoadingServers(false);
     }
   };
 
-  const groupedServices = {
-    core: services.filter(s => s.group === 'core'),
-    judge: services.filter(s => s.group === 'judge'),
-    auxiliary: services.filter(s => s.group === 'auxiliary'),
+  // 检查所有服务状态
+  const checkAllServicesStatus = async (items: ServiceItem[]) => {
+    for (const item of items) {
+      await checkServiceStatus(item.id);
+    }
   };
 
-  const ServiceRow = ({ service }: { service: Service }) => (
-    <div className="flex items-center justify-between p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">
-      <div className="flex-1">
-        <div className="flex items-center gap-3">
-          <h3 className="font-medium text-slate-900">{service.name}</h3>
-          <StatusBadge status={service.status} />
-        </div>
-        <p className="text-sm text-slate-500 mt-1">{service.description}</p>
-      </div>
+  // 检查单个服务状态
+  const checkServiceStatus = async (serviceId: string) => {
+    if (!currentServerId) return;
+    
+    const item = [...serviceList, ...dependencyList].find(s => s.id === serviceId);
+    if (!item) return;
+
+    setLoadingOperations(prev => ({ ...prev, [`${serviceId}-status`]: 'checking' }));
+
+    try {
+      // 使用SSH执行检查命令
+      const result = await serviceOperation(
+        currentServerId,
+        item.name,
+        'status'
+      );
       
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => handleCheckStatus(service.id)}
-          disabled={loadingService === service.id}
-        >
-          <Activity className="w-4 h-4 mr-1.5" />
-          状态
-        </Button>
+      const status: ServiceStatus = result.status === 'running' ? 'running' : 
+                                   result.status === 'stopped' ? 'stopped' : 'error';
+      updateServiceStatus(serviceId, status);
+    } catch (error) {
+      console.error('检查服务状态失败:', error);
+      updateServiceStatus(serviceId, 'error');
+    } finally {
+      setLoadingOperations(prev => {
+        const newState = { ...prev };
+        delete newState[`${serviceId}-status`];
+        return newState;
+      });
+    }
+  };
+
+  // 更新服务状态
+  const updateServiceStatus = (serviceId: string, status: ServiceStatus) => {
+    setServiceList(prev => prev.map(s => s.id === serviceId ? { ...s, status } : s));
+    setDependencyList(prev => prev.map(d => d.id === serviceId ? { ...d, status } : d));
+  };
+
+  // 服务操作
+  const handleServiceOperation = async (serviceId: string, operation: 'start' | 'stop' | 'restart' | 'status') => {
+    if (!currentServerId) {
+      toast.error('请先选择服务器');
+      return;
+    }
+
+    const item = [...serviceList, ...dependencyList].find(s => s.id === serviceId);
+    if (!item) {
+      toast.error('服务不存在');
+      return;
+    }
+
+    if (operation === 'status') {
+      await checkServiceStatus(serviceId);
+      return;
+    }
+
+    const operationKey = `${serviceId}-${operation}`;
+    setLoadingOperations(prev => ({ ...prev, [operationKey]: operation }));
+
+    try {
+      // 使用SSH执行操作
+      const result = await serviceOperation(
+        currentServerId,
+        item.name,
+        operation
+      );
+      
+      if (result.success) {
+        const operationNames = {
+          start: '启动',
+          stop: '停止',
+          restart: '重启',
+          status: '检查状态',
+        };
         
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => handleRestart(service.id)}
-          disabled={loadingService === service.id}
-        >
-          {loadingService === service.id ? (
-            <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-          ) : (
-            <RotateCw className="w-4 h-4 mr-1.5" />
-          )}
-          重启
-        </Button>
+        toast.success(`${item.name} ${operationNames[operation]}成功`);
         
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => handleStop(service.id)}
-          disabled={loadingService === service.id || service.status === 'stopped'}
-        >
-          <Square className="w-4 h-4 mr-1.5" />
-          停止
-        </Button>
+        // 操作后等待一下再检查状态
+        setTimeout(() => {
+          checkServiceStatus(serviceId);
+        }, 2000);
+      } else {
+        toast.error(`${item.name} ${operation}失败: ${result.error || '未知错误'}`);
+      }
+    } catch (error: any) {
+      toast.error(`操作失败: ${error.message}`);
+    } finally {
+      setLoadingOperations(prev => {
+        const newState = { ...prev };
+        delete newState[operationKey];
+        return newState;
+      });
+    }
+  };
+
+  const ServiceRow = ({ service }: { service: ServiceItem }) => {
+    const isLoading = Object.keys(loadingOperations).some(key => 
+      key.startsWith(`${service.id}-`)
+    );
+
+    return (
+      <div className="flex items-center justify-between p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">
+        <div className="flex-1">
+          <div className="flex items-center gap-3">
+            <h3 className="font-medium text-slate-900">{service.name}</h3>
+            <StatusBadge status={service.status} />
+            {service.type === 'dependency' && (
+              <span className="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded">依赖</span>
+            )}
+            {service.port && (
+              <span className="text-xs px-2 py-0.5 bg-slate-100 text-slate-700 rounded">
+                端口: {service.port}
+              </span>
+            )}
+          </div>
+          <p className="text-sm text-slate-500 mt-1">{service.description}</p>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleServiceOperation(service.id, 'status')}
+            disabled={isLoading}
+          >
+            {isLoading && loadingOperations[`${service.id}-status`] ? (
+              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+            ) : (
+              <Activity className="w-4 h-4 mr-1.5" />
+            )}
+            健康检查
+          </Button>
+          
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleServiceOperation(service.id, 'start')}
+            disabled={isLoading || service.status === 'running'}
+          >
+            {isLoading && loadingOperations[`${service.id}-start`] ? (
+              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+            ) : (
+              <Play className="w-4 h-4 mr-1.5" />
+            )}
+            启动
+          </Button>
+          
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleServiceOperation(service.id, 'restart')}
+            disabled={isLoading}
+          >
+            {isLoading && loadingOperations[`${service.id}-restart`] ? (
+              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+            ) : (
+              <RotateCw className="w-4 h-4 mr-1.5" />
+            )}
+            重启
+          </Button>
+          
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleServiceOperation(service.id, 'stop')}
+            disabled={isLoading || service.status === 'stopped'}
+          >
+            {isLoading && loadingOperations[`${service.id}-stop`] ? (
+              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+            ) : (
+              <Square className="w-4 h-4 mr-1.5" />
+            )}
+            停止
+          </Button>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
+
+  const currentServer = currentServerId ? servers[currentServerId] : null;
+  const hasServers = Object.keys(servers).length > 0;
 
   return (
     <div className="space-y-6">
@@ -154,86 +341,115 @@ export function Services() {
         <p className="text-slate-600 mt-1">远程服务启停控制与状态监控</p>
       </div>
 
-      {/* Core Services */}
-      <Card>
-        <CardHeader>
-          <CardTitle>核心服务</CardTitle>
-          <CardDescription>Backend、Nginx 等主要服务</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {groupedServices.core.map(service => (
-            <ServiceRow key={service.id} service={service} />
-          ))}
-        </CardContent>
-      </Card>
-
-      {/* Judge Services */}
-      <Card>
-        <CardHeader>
-          <CardTitle>判题服务</CardTitle>
-          <CardDescription>Judge、Heartbeat 监控服务</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {groupedServices.judge.map(service => (
-            <ServiceRow key={service.id} service={service} />
-          ))}
-        </CardContent>
-      </Card>
-
-      {/* Auxiliary Services */}
-      <Card>
-        <CardHeader>
-          <CardTitle>辅助服务</CardTitle>
-          <CardDescription>Scratch Runner 等额外服务</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {groupedServices.auxiliary.map(service => (
-            <ServiceRow key={service.id} service={service} />
-          ))}
-        </CardContent>
-      </Card>
-
-      {/* Quick Fixes */}
+      {/* 服务器选择 */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Wrench className="w-5 h-5" />
-            快捷修复
+            <Server className="w-5 h-5" />
+            服务器选择
           </CardTitle>
-          <CardDescription>常用的服务修复脚本</CardDescription>
+          <CardDescription>选择要管理的服务器</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {quickFixes.map(fix => {
-              const Icon = fix.icon;
-              return (
-                <div
-                  key={fix.id}
-                  className="border border-slate-200 rounded-lg p-4 hover:border-blue-300 transition-colors"
-                >
-                  <div className="flex items-start gap-3 mb-3">
-                    <div className="p-2 bg-blue-50 rounded-lg">
-                      <Icon className="w-5 h-5 text-blue-600" />
-                    </div>
-                    <div className="flex-1">
-                      <h3 className="font-medium text-slate-900">{fix.name}</h3>
-                      <p className="text-xs text-slate-500 mt-1">{fix.description}</p>
-                    </div>
-                  </div>
-                  <Button
-                    onClick={() => handleQuickFix(fix.id)}
-                    variant="outline"
-                    size="sm"
-                    className="w-full"
-                  >
-                    执行修复
-                  </Button>
+          {!hasServers ? (
+            <div className="text-center py-8 text-slate-500">
+              <Server className="w-12 h-12 mx-auto mb-4 text-slate-400" />
+              <p>暂无服务器配置</p>
+              <p className="text-sm mt-2">请前往设置页面添加服务器配置</p>
+            </div>
+          ) : (
+            <div className="flex items-center gap-4">
+              <Select
+                value={currentServerId || ''}
+                onValueChange={handleSwitchServer}
+                disabled={loadingServers}
+              >
+                <SelectTrigger className="w-[300px]">
+                  <SelectValue placeholder="选择服务器" />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.values(servers).map(server => (
+                    <SelectItem key={server.server_id} value={server.server_id}>
+                      <div className="flex items-center gap-2">
+                        <Server className="w-4 h-4" />
+                        <span>{server.name} ({server.host})</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              
+              <Button
+                variant="outline"
+                onClick={() => checkAllServicesStatus([...serviceList, ...dependencyList])}
+                disabled={loadingServers || !currentServerId}
+              >
+                {loadingServers ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    切换中...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                    刷新所有状态
+                  </>
+                )}
+              </Button>
+              
+              {currentServer && (
+                <div className="text-sm text-slate-600">
+                  <p className="font-medium">服务器: {currentServer.name}</p>
+                  <p className="text-xs text-slate-400">
+                    项目路径: {currentServer.project_path}
+                  </p>
                 </div>
-              );
-            })}
-          </div>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
+
+      {/* 服务列表 - 只在有服务器且已选择时显示 */}
+      {hasServers && currentServerId && (
+        <>
+          {/* 系统依赖 */}
+          {dependencyList.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Database className="w-5 h-5" />
+                  系统依赖
+                </CardTitle>
+                <CardDescription>PostgreSQL 等系统依赖服务</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {dependencyList.map(dep => (
+                  <ServiceRow key={dep.id} service={dep} />
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* 应用服务 */}
+          {serviceList.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Package className="w-5 h-5" />
+                  应用服务
+                </CardTitle>
+                <CardDescription>Backend、Frontend 等应用服务</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {serviceList.map(service => (
+                  <ServiceRow key={service.id} service={service} />
+                ))}
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
     </div>
   );
 }

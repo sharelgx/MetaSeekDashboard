@@ -129,3 +129,48 @@ export async function getRestartLog(serverId: string, lines: number = 100) {
   
   return response.json();
 }
+
+// 解析启动脚本
+export async function parseScript(serverId: string, scriptPath?: string) {
+  const response = await fetch(`${API_BASE_URL}/servers/${serverId}/parse-script`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ script_path: scriptPath }),
+  });
+  
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ detail: `HTTP ${response.status}: ${response.statusText}` }));
+    throw new Error(errorData.detail || errorData.message || `HTTP ${response.status}`);
+  }
+  
+  return response.json();
+}
+
+// 服务操作（启动、停止、重启、状态检查）
+export async function serviceOperation(
+  serverId: string,
+  serviceName: string,
+  operation: 'start' | 'stop' | 'restart' | 'status',
+  scriptPath?: string
+) {
+  const response = await fetch(`${API_BASE_URL}/servers/${serverId}/service-operation`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      service_name: serviceName,
+      operation: operation,
+      script_path: scriptPath,
+    }),
+  });
+  
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ detail: `HTTP ${response.status}: ${response.statusText}` }));
+    throw new Error(errorData.detail || errorData.message || `HTTP ${response.status}`);
+  }
+  
+  return response.json();
+}
