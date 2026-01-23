@@ -1,150 +1,191 @@
-# MetaSeek Dashboard
+# Ops Dashboard Design Spec
 
-MetaSeekOJ 本地化运维仪表盘 (Ops Dashboard)
+运维仪表盘项目 - 用于管理和监控服务器配置、部署、日志等。
 
-## 项目概述
+## 项目架构
 
-本项目是一个 **"MetaSeekOJ 本地化运维仪表盘" (Ops Dashboard)**。
-它的核心目标是让开发者在本地机器 (WSL2/Linux) 上，通过可视化界面管理远程腾讯云服务器 (Ubuntu)。
+- **前端**: React 18 + Vite + Tailwind CSS + Shadcn UI
+- **后端**: Python FastAPI + Uvicorn
+- **数据库**: PostgreSQL
 
-**核心功能**:
-*   **系统监控**: 查看远程服务器 CPU/内存、SSH 连接状态、核心服务 (Django, Nginx, Judge) 健康度。
-*   **代码发布**: 本地构建前端 (React/Vue)，并一键 rsync 同步代码到远程。
-*   **服务管理**: 重启后端、Nginx，修复 Scratch 编辑器等。
-*   **日志监控**: 实时查看远程日志文件。
+## 快速开始
 
-## 技术架构
+### 方式一：独立启动前端（推荐）
 
-项目采用 **前后端分离** 架构，通过本地 Loopback 通信：
-
-```
-React 前端 -- HTTP API --> FastAPI 后端 -- Python 调用 --> MCP 核心逻辑 -- SSH / Rsync --> 远程腾讯云服务器
-```
-
-### 前端 (Frontend)
-*   **路径**: `/frontend`
-*   **技术栈**: React 18, Vite, Tailwind CSS, Shadcn UI, Lucide Icons.
-*   **关键文件**:
-    *   `src/app/components/pages/*`: 各个功能页面 (Dashboard, Deployment, Services, Logs).
-    *   `src/lib/api.ts`: Axios 封装，处理与后端通信。
-    *   `vite.config.ts`: 配置了 `/api` 代理转发到后端 `8000` 端口。
-
-### 后端 (Backend)
-*   **路径**: `/backend`
-*   **技术栈**: Python FastAPI, Uvicorn.
-*   **职责**: 作为 API 网关，接收前端请求，调用底层的运维脚本。
-*   **关键文件**:
-    *   `main.py`: 定义 API 路由 (`/api/status`, `/api/sync`, `/api/restart` 等)。
-
-## 🚀 快速开始
-
-### 一键启动（推荐）
+前端服务可以独立运行，不依赖后端和数据库：
 
 ```bash
-# 启动所有服务（PostgreSQL + 后端 + 前端）
+# 启动前端服务（独立运行）
+bash start_frontend.sh
+```
+
+启动后访问：http://localhost:5173
+
+前端会显示启动引导页面，你可以通过页面启动后端和数据库服务。
+
+### 方式二：一键启动所有服务
+
+```bash
+# 启动所有服务（PostgreSQL、后端、前端）
 bash start.sh
-
-# 停止所有服务
-bash stop.sh
-
-# 健康检查
-bash check_health.sh
 ```
 
-启动脚本会自动：
-1. ✅ 启动 PostgreSQL 数据库
-2. ✅ 初始化数据库（如果未初始化）
-3. ✅ 检查并安装依赖
-4. ✅ 启动后端服务 (http://localhost:8000)
-5. ✅ 启动前端服务 (http://localhost:5173)
+### 方式三：分别启动
 
-### 手动启动
-
-如果需要手动启动各个服务，请参考 [启动指南](START_GUIDE.md)
-
-#### 启动后端
 ```bash
-cd backend
-python main.py
-# 服务将运行在 http://0.0.0.0:8000
+# 1. 启动前端（独立运行，不依赖其他服务）
+bash start_frontend.sh
+
+# 2. 启动后端和数据库（可选，可通过前端页面启动）
+bash start.sh
 ```
 
-#### 启动前端
-```bash
-cd frontend
-npm run dev
-# 服务将运行在 http://localhost:5173
-```
-
-访问浏览器: **http://localhost:5173**
-
-## 📁 项目结构
-
-```
-Opsdashboarddesignspec/
-├── frontend/          # React 前端应用
-├── backend/           # FastAPI 后端服务
-├── docs/              # 项目文档
-│   └── DESIGN_OpsDashboard.md  # 设计规范文档
-├── start.sh           # 一键启动脚本 ⭐
-├── stop.sh            # 停止所有服务脚本 ⭐
-├── check_health.sh    # 健康检查脚本 ⭐
-├── START_GUIDE.md     # 详细启动指南
-├── HANDOVER.md        # 项目交接文档
-└── README.md          # 本文件
-```
-
-## 📚 文档
-
-- [启动指南](START_GUIDE.md) - 详细的启动步骤和故障排查
-- [设计规范文档](docs/DESIGN_OpsDashboard.md) - UI/UX 设计规范
-- [项目交接文档](HANDOVER.md) - 项目交接说明
-- [PostgreSQL配置指南](backend/POSTGRESQL_SETUP.md) - 数据库配置
-- [SSH连接指南](backend/SSH_CONNECTION_GUIDE.md) - SSH配置说明
-
-## 🔧 常用脚本
-
-| 脚本 | 功能 | 说明 |
-|------|------|------|
-| `start.sh` | 一键启动 | 启动所有服务（PostgreSQL、后端、前端） |
-| `stop.sh` | 停止服务 | 停止所有运行的服务 |
-| `check_health.sh` | 健康检查 | 检查项目依赖和服务状态 |
-| `backend/start_backend.sh` | 启动后端 | 仅启动后端服务 |
-| `backend/setup_database.sh` | 数据库初始化 | 初始化PostgreSQL数据库 |
-| `backend/start_postgresql.sh` | 启动PostgreSQL | 仅启动PostgreSQL服务 |
-
-## 🌐 服务地址
+## 服务地址
 
 - **前端**: http://localhost:5173
 - **后端API**: http://localhost:8000
 - **API文档**: http://localhost:8000/docs
-- **PostgreSQL**: localhost:5432
+- **数据库**: PostgreSQL (localhost:5432)
 
-## 🔐 默认登录凭据
+## 停止服务
+
+```bash
+# 停止所有服务
+bash stop.sh
+
+# 仅停止前端
+pkill -f vite
+```
+
+## 默认登录凭据
 
 - 用户名: `admin` 或 `root`
 - 密码: `123456`
 
-## ⚠️ 注意事项
+## 使用流程
 
-1. **MCP 依赖**: 后端需要依赖 `mcp-servers/code-sync/server.py` 中的 `CodeSyncMCP` 类。如果从 MetaSeekOJdev 中剥离，需要确保该依赖可用或进行相应调整。
-
-2. **安全性**: 目前后端 API 没有任何鉴权 (CORS 开放)，仅限本地 `localhost` 使用。如果暴露到公网需加 Token 验证。
-
-3. **配置管理**: 服务器配置保存在 PostgreSQL 数据库中，包含 SSH 密码等敏感信息，请妥善保管。
-
-4. **PostgreSQL**: 启动脚本会尝试自动启动 PostgreSQL，但可能需要 sudo 权限。如果自动启动失败，请手动执行：
+1. **启动前端服务**（独立运行，不依赖其他服务）：
    ```bash
-   sudo service postgresql start
+   bash start_frontend.sh
+   ```
+   访问 http://localhost:5173 查看服务状态
+
+2. **启动项目服务**（PostgreSQL、后端）：
+   ```bash
+   bash start.sh
+   ```
+   等待15-30秒，服务启动完成后，前端页面会自动检测并跳转到登录页面
+
+3. **日常使用**：
+   - 前端服务应该始终运行（可通过系统服务或开机自启动）
+   - 访问 http://localhost:5173 查看服务状态
+   - 如果后端未运行，页面会显示启动提示，需要在终端执行 `bash start.sh`
+
+## 系统服务配置（可选）
+
+如果你希望前端服务在系统启动时自动运行，可以创建 systemd 服务：
+
+```bash
+# 创建服务文件（需要root权限）
+sudo nano /etc/systemd/system/opsdashboard-frontend.service
+```
+
+服务文件内容：
+```ini
+[Unit]
+Description=Ops Dashboard Frontend Service
+After=network.target
+
+[Service]
+Type=simple
+User=sharelgx
+WorkingDirectory=/home/sharelgx/Opsdashboarddesignspec
+ExecStart=/usr/bin/bash /home/sharelgx/Opsdashboarddesignspec/start_frontend.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用服务：
+```bash
+sudo systemctl enable opsdashboard-frontend.service
+sudo systemctl start opsdashboard-frontend.service
+```
+
+## 健康检查
+
+```bash
+# 检查所有服务状态
+bash check_health.sh
+```
+
+## 日志文件
+
+- 后端日志: `/tmp/opsdashboard_backend.log`
+- 前端日志: `/tmp/opsdashboard_frontend.log`
+- 启动脚本日志: `/tmp/startup_script.log`
+
+## 常见问题
+
+### 前端无法访问
+
+1. 检查前端服务是否运行：
+   ```bash
+   ps aux | grep vite
    ```
 
-## 📋 环境要求
+2. 如果未运行，启动前端：
+   ```bash
+   bash start_frontend.sh
+   ```
 
-- **Python**: >= 3.8
-- **Node.js**: >= 18
-- **PostgreSQL**: >= 12
-- **操作系统**: Linux/WSL2
+3. 检查端口是否被占用：
+   ```bash
+   ss -tlnp | grep 5173
+   ```
 
-## License
+### 后端无法启动
 
-[待定]
+1. 检查PostgreSQL是否运行：
+   ```bash
+   pg_isready -h localhost -p 5432
+   ```
+
+2. 检查后端日志：
+   ```bash
+   tail -f /tmp/opsdashboard_backend.log
+   ```
+
+## 开发说明
+
+### 前端开发
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### 后端开发
+
+```bash
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python3 main.py
+```
+
+## 项目结构
+
+```
+.
+├── frontend/          # 前端代码
+├── backend/           # 后端代码
+├── start.sh           # 启动所有服务
+├── start_frontend.sh  # 仅启动前端（独立运行）
+├── stop.sh            # 停止所有服务
+└── check_health.sh    # 健康检查
+```

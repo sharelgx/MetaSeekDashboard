@@ -46,13 +46,22 @@ except ImportError as e:
                 servers = session.query(ServerConfig).filter(ServerConfig.is_active == True).all()
                 result = {}
                 for server in servers:
-                    result[server.server_id] = server.to_dict()
+                    try:
+                        result[server.server_id] = server.to_dict()
+                    except Exception as e:
+                        print(f"Error converting server {server.server_id} to dict: {e}")
+                        # 跳过有问题的服务器配置，继续处理其他服务器
+                        continue
                 
                 if not db:
                     session.close()
                 return {"servers": result}
             except Exception as e:
+                import traceback
+                error_trace = traceback.format_exc()
                 print(f"Error listing servers: {e}")
+                print(f"Traceback: {error_trace}")
+                # 确保返回有效的字典结构
                 return {"servers": {}}
         
         def get_config(self):
@@ -312,7 +321,16 @@ async def get_status(server_id: Optional[str] = None, db: Session = Depends(get_
 
 @app.get("/api/servers")
 async def list_servers(db: Session = Depends(get_db)):
-    return mcp.list_servers(db=db)
+    try:
+        result = mcp.list_servers(db=db)
+        return result
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Error listing servers: {e}")
+        print(f"Traceback: {error_trace}")
+        # 返回空列表而不是500错误，避免前端崩溃
+        return {"servers": {}}
 
 @app.get("/api/config")
 async def get_config():
@@ -1036,62 +1054,169 @@ async def service_operation_endpoint(server_id: str, request: ServiceOperationRe
         command = None
         
         if operation == "status":
-            # 健康检查
-            if "postgresql" in service_name.lower():
+            # 健康检查 - 根据服务名称匹配检查命令
+            service_lower = service_name.lower()
+            if "postgresql" in service_lower or "postgres" in service_lower:
                 command = "pg_isready -h localhost -p 5432"
-            elif "backend" in service_name.lower() or "django" in service_name.lower():
-                command = "ps aux | grep -E 'python3.*manage.py|python3.*main.py' | grep -v grep || echo 'NOT_RUNNING'"
-            elif "nginx" in service_name.lower():
+            elif "backend" in service_lower or "django" in service_lower:
+                # 只匹配Django Backend (8086端口)，排除Opsdashboard的main.py
+                command = "ps aux | grep -E 'python.*manage.py runserver.*8086' | grep -v grep || echo 'NOT_RUNNING'"
+            elif "nginx" in service_lower:
                 command = "systemctl status nginx 2>&1 | head -3 || service nginx status 2>&1 | head -3"
-            elif "judge" in service_name.lower():
-                command = "ps aux | grep -E 'judge|dramatiq' | grep -v grep || echo 'NOT_RUNNING'"
-            elif "frontend" in service_name.lower() or "vite" in service_name.lower():
+            elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
+                command = "ps aux | grep -E 'start_dramatiq_worker\\.py|manage\\.py rundramatiq|dramatiq.*judge\\.tasks' | grep -v grep || echo 'NOT_RUNNING'"
+            elif "heartbeat" in service_lower:
+                command = "ps aux | grep -E 'heartbeat_metaseek_judge\\.py' | grep -v grep || echo 'NOT_RUNNING'"
+            elif "scratch.*editor" in service_lower or ("scratch" in service_lower and "editor" in service_lower):
+                command = "ps aux | grep -E 'scratch.*8601|webpack.*8601|start-editor\\.sh' | grep -v grep || echo 'NOT_RUNNING'"
+            elif "scratch.*runner" in service_lower or ("scratch" in service_lower and "runner" in service_lower):
+                # 优先使用端口检查（更可靠），然后检查进程（必须匹配3002端口或scratch-runner）
+                # 使用明确的输出格式，确保NOT_RUNNING能正确输出
+                # 注意：需要检查进程输出是否为空，不能仅依赖退出码
+                command = "if lsof -i:3002 >/dev/null 2>&1; then echo 'RUNNING'; elif [ -n \"$(ps aux | grep -E 'node.*server\\.js.*3002|scratch-runner.*3002|PORT=3002' | grep -v grep | grep -v cursor | head -1)\" ]; then echo 'RUNNING'; else echo 'NOT_RUNNING'; fi"
+            elif "judge" in service_lower and "server" in service_lower:
+                command = "docker ps | grep -E 'judge|metaseek-judge' || echo 'NOT_RUNNING'"
+            elif "vue" in service_lower and "frontend" in service_lower:
+                command = "ps aux | grep -E 'vue|webpack.*8081' | grep -v grep || echo 'NOT_RUNNING'"
+            elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
+                command = "ps aux | grep -E 'vite.*8080|npm run dev.*--port 8080' | grep -v grep || echo 'NOT_RUNNING'"
+            elif "frontend" in service_lower or "vite" in service_lower:
                 command = "ps aux | grep -E 'vite|npm.*dev' | grep -v grep || echo 'NOT_RUNNING'"
             else:
-                command = f"ps aux | grep -i '{service_name}' | grep -v grep || echo 'NOT_RUNNING'"
+                # 通用检查：使用服务名称的关键词
+                keywords = []
+                if "dramatiq" in service_lower or "worker" in service_lower:
+                    keywords.append("start_dramatiq_worker")
+                if "heartbeat" in service_lower:
+                    keywords.append("heartbeat_metaseek_judge")
+                if "scratch" in service_lower:
+                    if "editor" in service_lower:
+                        keywords.append("scratch.*8601|start-editor")
+                    elif "runner" in service_lower:
+                        keywords.append("scratch-runner|node.*server\\.js.*3002")
+                    else:
+                        keywords.append("scratch")
+                if keywords:
+                    pattern = "|".join(keywords)
+                    command = f"ps aux | grep -E '{pattern}' | grep -v grep || echo 'NOT_RUNNING'"
+                else:
+                    command = f"ps aux | grep -i '{service_name}' | grep -v grep || echo 'NOT_RUNNING'"
         
         elif operation == "start":
             # 启动服务
-            if "postgresql" in service_name.lower():
-                command = "sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start"
-            elif "backend" in service_name.lower() or "django" in service_name.lower():
-                command = f"cd {project_path} && nohup python3 manage.py runserver 0.0.0.0:8000 > /tmp/backend.log 2>&1 &"
-            elif "nginx" in service_name.lower():
-                command = "sudo service nginx start"
-            elif "judge" in service_name.lower():
-                command = f"cd {project_path} && nohup python3 -m dramatiq judge 2>&1 &"
-            elif "frontend" in service_name.lower() or "vite" in service_name.lower():
+            service_lower = service_name.lower()
+            if "postgresql" in service_lower or "postgres" in service_lower:
+                # 使用sudo -S从标准输入读取密码（非交互式）
+                command = "echo '123456' | sudo -S service postgresql start 2>/dev/null || (echo '123456' | sudo -S -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start 2>/dev/null || sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start)"
+            elif "backend" in service_lower or "django" in service_lower:
+                # Django Backend (端口8086)
+                command = f"cd {project_path}/OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 &"
+            elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
+                # Dramatiq Worker
+                command = f"cd {project_path}/OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 &"
+            elif "heartbeat" in service_lower:
+                # Heartbeat Monitor
+                command = f"cd {project_path}/OnlineJudge && TOKEN=$(python -c \"import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','oj.settings');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)\") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 &"
+            elif "vue" in service_lower and "frontend" in service_lower:
+                # Vue Frontend (端口8081)
+                command = f"cd {project_path}/OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 &"
+            elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
+                # React Classroom (端口8080)
+                command = f"cd {project_path}/OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 &"
+            elif "scratch" in service_lower and "editor" in service_lower:
+                # Scratch Editor (端口8601)
+                command = f"cd {project_path}/scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 &"
+            elif "scratch" in service_lower and "runner" in service_lower:
+                # Scratch Runner (端口3002)
+                command = f"cd {project_path}/scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 &"
+            elif "judge" in service_lower and "server" in service_lower:
+                # Judge Server (Docker)
+                command = "docker start metaseek-judge-dev 2>/dev/null || (docker run -d --name metaseek-judge-dev -p 12360:12360 metaseek-judge:dev 2>&1 || echo 'DOCKER_NOT_FOUND')"
+            elif "nginx" in service_lower:
+                # 使用sudo -S从标准输入读取密码（非交互式）
+                command = "echo '123456' | sudo -S service nginx start 2>/dev/null || sudo service nginx start"
+            elif "frontend" in service_lower or "vite" in service_lower:
                 command = f"cd {project_path}/frontend && nohup npm run dev > /tmp/frontend.log 2>&1 &"
             else:
                 # 尝试从启动脚本中查找对应的启动函数
-                command = f"cd {project_path} && bash -c 'source start.sh && {service_name.lower()}_start()' 2>&1 || echo 'SERVICE_NOT_FOUND'"
+                command = f"cd {project_path} && bash -c 'source start.sh && {service_lower}_start()' 2>&1 || echo 'SERVICE_NOT_FOUND'"
         
         elif operation == "stop":
             # 停止服务
-            if "postgresql" in service_name.lower():
-                command = "sudo service postgresql stop"
-            elif "backend" in service_name.lower() or "django" in service_name.lower():
-                command = "pkill -f 'python3.*manage.py|python3.*main.py'"
-            elif "nginx" in service_name.lower():
-                command = "sudo service nginx stop"
-            elif "judge" in service_name.lower():
+            service_lower = service_name.lower()
+            if "postgresql" in service_lower or "postgres" in service_lower:
+                # 使用sudo -S从标准输入读取密码（非交互式）
+                command = "echo '123456' | sudo -S service postgresql stop 2>/dev/null || sudo service postgresql stop"
+            elif "backend" in service_lower or "django" in service_lower:
+                # Django Backend (端口8086)
+                command = "pkill -f 'python.*manage.py runserver.*8086'"
+            elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
+                # Dramatiq Worker
+                command = "pkill -f 'start_dramatiq_worker\\.py|manage\\.py rundramatiq|dramatiq.*judge\\.tasks'"
+            elif "heartbeat" in service_lower:
+                # Heartbeat Monitor
+                command = "pkill -f 'heartbeat_metaseek_judge\\.py'"
+            elif "vue" in service_lower and "frontend" in service_lower:
+                # Vue Frontend (端口8081)
+                command = "pkill -f 'vue|webpack.*8081'"
+            elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
+                # React Classroom (端口8080)
+                command = "pkill -f 'vite.*8080|npm run dev.*--port 8080'"
+            elif "scratch" in service_lower and "editor" in service_lower:
+                # Scratch Editor (端口8601)
+                command = "pkill -f 'scratch.*8601|webpack.*8601'"
+            elif "scratch" in service_lower and "runner" in service_lower:
+                # Scratch Runner (端口3002)
+                command = "pkill -f 'scratch-runner|node.*server\\.js.*3002'"
+            elif "judge" in service_lower and "server" in service_lower:
+                # Judge Server (Docker)
+                command = "docker stop metaseek-judge-dev 2>/dev/null || echo 'DOCKER_NOT_FOUND'"
+            elif "nginx" in service_lower:
+                # 使用sudo -S从标准输入读取密码（非交互式）
+                command = "echo '123456' | sudo -S service nginx stop 2>/dev/null || sudo service nginx stop"
+            elif "judge" in service_lower:
                 command = "pkill -f 'dramatiq|judge'"
-            elif "frontend" in service_name.lower() or "vite" in service_name.lower():
+            elif "frontend" in service_lower or "vite" in service_lower:
                 command = "pkill -f 'vite|npm.*dev'"
             else:
                 command = f"pkill -f -i '{service_name}'"
         
         elif operation == "restart":
             # 重启服务（先停止再启动）
-            if "postgresql" in service_name.lower():
-                command = "sudo service postgresql restart"
-            elif "backend" in service_name.lower() or "django" in service_name.lower():
-                command = f"pkill -f 'python3.*manage.py|python3.*main.py'; sleep 1; cd {project_path} && nohup python3 manage.py runserver 0.0.0.0:8000 > /tmp/backend.log 2>&1 &"
-            elif "nginx" in service_name.lower():
-                command = "sudo service nginx restart"
-            elif "judge" in service_name.lower():
+            service_lower = service_name.lower()
+            if "postgresql" in service_lower or "postgres" in service_lower:
+                # 使用sudo -S从标准输入读取密码（非交互式）
+                command = "echo '123456' | sudo -S service postgresql restart 2>/dev/null || sudo service postgresql restart"
+            elif "backend" in service_lower or "django" in service_lower:
+                # Django Backend (端口8086)
+                command = f"pkill -f 'python.*manage.py runserver.*8086'; sleep 1; cd {project_path}/OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 &"
+            elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
+                # Dramatiq Worker
+                command = f"pkill -f 'start_dramatiq_worker\\.py|manage\\.py rundramatiq|dramatiq.*judge\\.tasks'; sleep 1; cd {project_path}/OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 &"
+            elif "heartbeat" in service_lower:
+                # Heartbeat Monitor
+                command = f"pkill -f 'heartbeat_metaseek_judge\\.py'; sleep 1; cd {project_path}/OnlineJudge && TOKEN=$(python -c \"import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','oj.settings');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)\") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 &"
+            elif "vue" in service_lower and "frontend" in service_lower:
+                # Vue Frontend (端口8081)
+                command = f"pkill -f 'vue|webpack.*8081'; sleep 1; cd {project_path}/OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 &"
+            elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
+                # React Classroom (端口8080)
+                command = f"pkill -f 'vite.*8080|npm run dev.*--port 8080'; sleep 1; cd {project_path}/OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 &"
+            elif "scratch" in service_lower and "editor" in service_lower:
+                # Scratch Editor (端口8601)
+                command = f"pkill -f 'scratch.*8601|webpack.*8601'; sleep 1; cd {project_path}/scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 &"
+            elif "scratch" in service_lower and "runner" in service_lower:
+                # Scratch Runner (端口3002)
+                command = f"pkill -f 'scratch-runner|node.*server\\.js.*3002'; sleep 1; cd {project_path}/scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 &"
+            elif "judge" in service_lower and "server" in service_lower:
+                # Judge Server (Docker)
+                command = "docker stop metaseek-judge-dev 2>/dev/null; sleep 1; docker start metaseek-judge-dev 2>/dev/null || (docker run -d --name metaseek-judge-dev -p 12360:12360 metaseek-judge:dev 2>&1 || echo 'DOCKER_NOT_FOUND')"
+            elif "nginx" in service_lower:
+                # 使用sudo -S从标准输入读取密码（非交互式）
+                command = "echo '123456' | sudo -S service nginx restart 2>/dev/null || sudo service nginx restart"
+            elif "judge" in service_lower:
                 command = f"pkill -f 'dramatiq|judge'; sleep 1; cd {project_path} && nohup python3 -m dramatiq judge 2>&1 &"
-            elif "frontend" in service_name.lower() or "vite" in service_name.lower():
+            elif "frontend" in service_lower or "vite" in service_lower:
                 command = f"pkill -f 'vite|npm.*dev'; sleep 1; cd {project_path}/frontend && nohup npm run dev > /tmp/frontend.log 2>&1 &"
             else:
                 command = f"pkill -f -i '{service_name}'; sleep 2; cd {project_path} && bash start.sh"
@@ -1100,7 +1225,9 @@ async def service_operation_endpoint(server_id: str, request: ServiceOperationRe
             raise HTTPException(status_code=400, detail=f"不支持的操作: {operation}")
         
         # 执行命令
-        exec_result = ssh_manager.execute_command(f"cd {project_path} && {command}")
+        # 清理环境变量，避免npmrc等配置干扰
+        clean_command = f"cd {project_path} && unset NPM_CONFIG_PREFIX NPM_CONFIG_GLOBALCONFIG 2>/dev/null; {command}"
+        exec_result = ssh_manager.execute_command(clean_command)
         ssh_manager.close()
         
         # 解析结果
@@ -1108,15 +1235,108 @@ async def service_operation_endpoint(server_id: str, request: ServiceOperationRe
         stderr = exec_result.get("stderr", "")
         success = exec_result.get("success", False)
         
+        # 合并stdout和stderr进行检查（某些命令可能将输出写入stderr）
+        combined_output = (stdout + " " + stderr).strip()
+        
         # 判断服务状态
         status = "unknown"
         if operation == "status":
-            if "NOT_RUNNING" in stdout or "inactive" in stdout.lower() or "stopped" in stdout.lower():
+            # 检查命令输出
+            output_lower = combined_output.lower()
+            exit_status = exec_result.get("exit_status", -1)
+            
+            # 关键判断：如果明确包含NOT_RUNNING，说明服务未运行（检查stdout和stderr）
+            if "NOT_RUNNING" in stdout or "NOT_RUNNING" in stderr:
                 status = "stopped"
-            elif "running" in stdout.lower() or "active" in stdout.lower() or exec_result.get("exit_status") == 0:
-                status = "running"
+            # 对于pg_isready等特殊命令
+            elif "postgresql" in service_name.lower() or "postgres" in service_name.lower():
+                if "accepting connections" in output_lower or exit_status == 0:
+                    status = "running"
+                else:
+                    status = "stopped"
+            # 对于systemctl status命令
+            elif "systemctl" in command or "service" in command:
+                if "running" in output_lower or "active" in output_lower:
+                    status = "running"
+                elif "stopped" in output_lower or "inactive" in output_lower:
+                    status = "stopped"
+                else:
+                    status = "stopped"
+            # 对于lsof端口检查命令（最可靠的方式）
+            elif "lsof -i:" in command or ("lsof" in command and "-i:" in command):
+                # 关键：优先检查NOT_RUNNING（检查stdout和stderr）
+                if "NOT_RUNNING" in stdout or "NOT_RUNNING" in stderr:
+                    status = "stopped"
+                # 检查是否有RUNNING标记（新的检查命令格式）
+                elif "RUNNING" in stdout or "RUNNING" in stderr:
+                    status = "running"
+                # lsof命令成功（exit_status == 0）说明端口在监听，服务在运行
+                elif exit_status == 0:
+                    # 进一步验证：确保不是空输出
+                    if stdout.strip():
+                        status = "running"
+                    else:
+                        status = "stopped"
+                else:
+                    # lsof失败，检查是否有进程检查的fallback
+                    if "ps aux" in command or "grep" in command:
+                        # 如果fallback检查有输出且不是NOT_RUNNING，进一步验证
+                        if (stdout.strip() or stderr.strip()) and "NOT_RUNNING" not in combined_output:
+                            # 验证输出是否包含相关关键词（避免误判）
+                            if any(keyword in combined_output for keyword in ["node", "server.js", "scratch", "3002"]):
+                                status = "running"
+                            else:
+                                status = "stopped"
+                        else:
+                            # 输出为空或包含NOT_RUNNING，认为未运行
+                            status = "stopped"
+                    else:
+                        status = "stopped"
+            # 对于ps aux | grep命令（最常见的检查方式）
+            elif "ps aux" in command or ("grep" in command and "ps" in command):
+                # 关键：如果明确包含NOT_RUNNING，说明服务未运行（检查stdout和stderr）
+                if "NOT_RUNNING" in stdout or "NOT_RUNNING" in stderr:
+                    status = "stopped"
+                # 如果命令执行成功（exit_status == 0）且有输出，说明找到了进程
+                elif exit_status == 0 and (stdout.strip() or stderr.strip()):
+                    # 使用combined_output进行检查
+                    # 检查输出是否包含进程信息关键词（更严格的验证）
+                    process_keywords = ["python", "node", "npm", "vite", "webpack", "docker", "postgres", "bash", "sh"]
+                    # 对于Django Backend，必须包含manage.py和8086
+                    if "backend" in service_lower or "django" in service_lower:
+                        if "manage.py" in combined_output and "8086" in combined_output:
+                            status = "running"
+                        else:
+                            status = "stopped"
+                    # 对于其他服务，检查关键词
+                    elif any(keyword in combined_output for keyword in process_keywords):
+                        status = "running"
+                    else:
+                        # 有输出但不包含关键词，认为未运行
+                        status = "stopped"
+                # 如果命令执行失败或输出为空，说明没找到进程
+                elif exit_status != 0 or not (stdout.strip() or stderr.strip()):
+                    status = "stopped"
+                else:
+                    # 其他情况，默认认为未运行（更保守）
+                    status = "stopped"
+            # 对于docker ps命令
+            elif "docker ps" in command:
+                if stdout.strip() and "CONTAINER" in stdout:
+                    status = "running"
+                else:
+                    status = "stopped"
+            # 默认判断：根据退出状态和输出
             else:
-                status = "error"
+                if exit_status == 0:
+                    if "running" in output_lower or "active" in output_lower:
+                        status = "running"
+                    elif stdout.strip() and "NOT_RUNNING" not in stdout:
+                        status = "running"
+                    else:
+                        status = "stopped"
+                else:
+                    status = "stopped"
         elif operation in ["start", "stop", "restart"]:
             if success:
                 status = "running" if operation in ["start", "restart"] else "stopped"
@@ -1243,6 +1463,7 @@ async def local_service_status(request: LocalServiceStatusRequest):
 async def local_service_operation(request: LocalServiceOperationRequest):
     """
     执行本地服务操作（启动、停止、重启）
+    注意：此API只用于本地8080项目，不影响远程服务器
     """
     import subprocess
     import os
@@ -1252,17 +1473,49 @@ async def local_service_operation(request: LocalServiceOperationRequest):
         operation = request.operation
         command = request.command
         
-        # 获取项目根目录
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        # 本地8080项目根目录（固定路径，不影响远程服务器）
+        local_project_root = "/home/sharelgx/MetaSeekOJdev"
+        if not os.path.exists(local_project_root):
+            return {
+                "success": False,
+                "error": f"本地项目路径不存在: {local_project_root}"
+            }
         
-        # 切换到项目目录执行命令
+        service_lower = service_id.lower()
+        
+        # 根据service_id自动构建命令（类似远程服务操作，但使用本地路径）
         if operation == "start":
             # 启动服务：在后台运行
-            if "postgresql" in service_id.lower():
+            if "postgresql" in service_lower or "postgres" in service_lower:
                 # PostgreSQL需要sudo
-                full_command = f"cd {project_root} && echo '123456' | sudo -S {command}"
+                full_command = f"echo '123456' | sudo -S service postgresql start 2>/dev/null || (echo '123456' | sudo -S -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start 2>/dev/null || sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start)"
+            elif "backend" in service_lower or "django" in service_lower:
+                # Django Backend (端口8086)
+                full_command = f"cd {local_project_root}/OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 &"
+            elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
+                # Dramatiq Worker
+                full_command = f"cd {local_project_root}/OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 &"
+            elif "heartbeat" in service_lower:
+                # Heartbeat Monitor
+                full_command = f"cd {local_project_root}/OnlineJudge && TOKEN=$(python -c \"import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','oj.settings');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)\") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 &"
+            elif "vue" in service_lower and "frontend" in service_lower:
+                # Vue Frontend (端口8081)
+                full_command = f"cd {local_project_root}/OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 &"
+            elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
+                # React Classroom (端口8080) - 本地服务
+                full_command = f"cd {local_project_root}/OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 &"
+            elif "scratch" in service_lower and "editor" in service_lower:
+                # Scratch Editor (端口8601)
+                full_command = f"cd {local_project_root}/scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 &"
+            elif "scratch" in service_lower and "runner" in service_lower:
+                # Scratch Runner (端口3002)
+                full_command = f"cd {local_project_root}/scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 &"
+            elif "judge" in service_lower and "server" in service_lower:
+                # Judge Server (Docker)
+                full_command = "docker start metaseek-judge-dev 2>/dev/null || (docker run -d --name metaseek-judge-dev -p 12360:12360 metaseek-judge:dev 2>&1 || echo 'DOCKER_NOT_FOUND')"
             else:
-                full_command = f"cd {project_root} && {command}"
+                # 使用传入的命令（兼容旧版本）
+                full_command = command
             
             # 使用nohup在后台执行
             process = subprocess.Popen(
@@ -1294,10 +1547,35 @@ async def local_service_operation(request: LocalServiceOperationRequest):
         
         elif operation == "stop":
             # 停止服务：直接执行停止命令
-            if "postgresql" in service_id.lower():
-                full_command = f"cd {project_root} && echo '123456' | sudo -S {command}"
+            if "postgresql" in service_lower or "postgres" in service_lower:
+                full_command = "echo '123456' | sudo -S service postgresql stop 2>/dev/null || sudo service postgresql stop"
+            elif "backend" in service_lower or "django" in service_lower:
+                # Django Backend (端口8086)
+                full_command = "pkill -f 'python.*manage.py runserver.*8086'"
+            elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
+                # Dramatiq Worker
+                full_command = "pkill -f 'start_dramatiq_worker\\.py|manage\\.py rundramatiq|dramatiq.*judge\\.tasks'"
+            elif "heartbeat" in service_lower:
+                # Heartbeat Monitor
+                full_command = "pkill -f 'heartbeat_metaseek_judge\\.py'"
+            elif "vue" in service_lower and "frontend" in service_lower:
+                # Vue Frontend (端口8081)
+                full_command = "pkill -f 'vue|webpack.*8081'"
+            elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
+                # React Classroom (端口8080) - 本地服务
+                full_command = "pkill -f 'vite.*8080|npm run dev.*--port 8080'"
+            elif "scratch" in service_lower and "editor" in service_lower:
+                # Scratch Editor (端口8601)
+                full_command = "pkill -f 'scratch.*8601|webpack.*8601'"
+            elif "scratch" in service_lower and "runner" in service_lower:
+                # Scratch Runner (端口3002)
+                full_command = "pkill -f 'scratch-runner|node.*server\\.js.*3002'"
+            elif "judge" in service_lower and "server" in service_lower:
+                # Judge Server (Docker)
+                full_command = "docker stop metaseek-judge-dev 2>/dev/null || echo 'DOCKER_NOT_FOUND'"
             else:
-                full_command = f"cd {project_root} && {command}"
+                # 使用传入的命令（兼容旧版本）
+                full_command = command
             
             result = subprocess.run(
                 full_command,
@@ -1320,23 +1598,56 @@ async def local_service_operation(request: LocalServiceOperationRequest):
         
         elif operation == "restart":
             # 重启服务：先停止再启动
-            # 停止
-            if "postgresql" in service_id.lower():
-                stop_cmd = f"cd {project_root} && echo '123456' | sudo -S {command.split(';')[0]}"
+            import time
+            
+            # 停止命令
+            if "postgresql" in service_lower or "postgres" in service_lower:
+                stop_cmd = "echo '123456' | sudo -S service postgresql stop 2>/dev/null || sudo service postgresql stop"
+            elif "backend" in service_lower or "django" in service_lower:
+                stop_cmd = "pkill -f 'python.*manage.py runserver.*8086'"
+            elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
+                stop_cmd = "pkill -f 'start_dramatiq_worker\\.py|manage\\.py rundramatiq|dramatiq.*judge\\.tasks'"
+            elif "heartbeat" in service_lower:
+                stop_cmd = "pkill -f 'heartbeat_metaseek_judge\\.py'"
+            elif "vue" in service_lower and "frontend" in service_lower:
+                stop_cmd = "pkill -f 'vue|webpack.*8081'"
+            elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
+                stop_cmd = "pkill -f 'vite.*8080|npm run dev.*--port 8080'"
+            elif "scratch" in service_lower and "editor" in service_lower:
+                stop_cmd = "pkill -f 'scratch.*8601|webpack.*8601'"
+            elif "scratch" in service_lower and "runner" in service_lower:
+                stop_cmd = "pkill -f 'scratch-runner|node.*server\\.js.*3002'"
+            elif "judge" in service_lower and "server" in service_lower:
+                stop_cmd = "docker stop metaseek-judge-dev 2>/dev/null || echo 'DOCKER_NOT_FOUND'"
             else:
-                stop_cmd = f"cd {project_root} && {command.split(';')[0]}"
+                # 使用传入的命令（兼容旧版本）
+                stop_cmd = command.split(';')[0] if ';' in command else command
             
             subprocess.run(stop_cmd, shell=True, capture_output=True, timeout=10)
-            
-            # 等待
-            import time
             time.sleep(1)
             
-            # 启动
-            if "postgresql" in service_id.lower():
-                start_cmd = f"cd {project_root} && echo '123456' | sudo -S {command.split(';')[1].strip()}"
+            # 启动命令
+            if "postgresql" in service_lower or "postgres" in service_lower:
+                start_cmd = "echo '123456' | sudo -S service postgresql start 2>/dev/null || (echo '123456' | sudo -S -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start 2>/dev/null || sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start)"
+            elif "backend" in service_lower or "django" in service_lower:
+                start_cmd = f"cd {local_project_root}/OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 &"
+            elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
+                start_cmd = f"cd {local_project_root}/OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 &"
+            elif "heartbeat" in service_lower:
+                start_cmd = f"cd {local_project_root}/OnlineJudge && TOKEN=$(python -c \"import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','oj.settings');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)\") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 &"
+            elif "vue" in service_lower and "frontend" in service_lower:
+                start_cmd = f"cd {local_project_root}/OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 &"
+            elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
+                start_cmd = f"cd {local_project_root}/OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 &"
+            elif "scratch" in service_lower and "editor" in service_lower:
+                start_cmd = f"cd {local_project_root}/scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 &"
+            elif "scratch" in service_lower and "runner" in service_lower:
+                start_cmd = f"cd {local_project_root}/scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 &"
+            elif "judge" in service_lower and "server" in service_lower:
+                start_cmd = "docker stop metaseek-judge-dev 2>/dev/null; sleep 1; docker start metaseek-judge-dev 2>/dev/null || (docker run -d --name metaseek-judge-dev -p 12360:12360 metaseek-judge:dev 2>&1 || echo 'DOCKER_NOT_FOUND')"
             else:
-                start_cmd = f"cd {project_root} && {command.split(';')[1].strip()}"
+                # 使用传入的命令（兼容旧版本）
+                start_cmd = command.split(';')[1].strip() if ';' in command else command
             
             process = subprocess.Popen(
                 start_cmd,
@@ -1376,6 +1687,126 @@ async def local_service_operation(request: LocalServiceOperationRequest):
             "success": False,
             "error": str(e)
         }
+
+# 服务连通性测试请求模型
+class ServiceConnectivityTestRequest(BaseModel):
+    server_id: str
+    service_id: str
+    port: Optional[int] = None
+    health_check_url: Optional[str] = None
+    check_command: str
+
+@app.post("/api/services/test-connectivity")
+async def test_service_connectivity(request: ServiceConnectivityTestRequest, db: Session = Depends(get_db)):
+    """
+    测试服务连通性（端口、进程、HTTP健康检查）
+    """
+    try:
+        servers_result = mcp.list_servers(db=db)
+        servers = servers_result.get("servers", {})
+        
+        if request.server_id not in servers:
+            raise HTTPException(status_code=404, detail=f"服务器 {request.server_id} 不存在")
+        
+        server_config = servers[request.server_id]
+        project_path = server_config.get("project_path", "")
+        
+        # 连接SSH
+        password = server_config.get("password") if server_config.get("auth_type") == "password" else None
+        private_key_path = server_config.get("private_key_path") if server_config.get("auth_type") == "key" else None
+        private_key_content = server_config.get("private_key_content") if server_config.get("auth_type") == "key" else None
+        
+        result = ssh_manager.connect(
+            host=server_config.get("host"),
+            user=server_config.get("user"),
+            port=server_config.get("port", 22),
+            password=password,
+            private_key_path=private_key_path,
+            private_key_content=private_key_content,
+            timeout=10
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=f"SSH连接失败: {result.get('message')}")
+        
+        test_results = {
+            "port_check": None,
+            "process_check": None,
+            "http_check": None,
+        }
+        errors = []
+        
+        # 1. 端口检查
+        if request.port:
+            try:
+                port_check_cmd = f"ss -tlnp 2>/dev/null | grep -q ':{request.port} ' || netstat -tlnp 2>/dev/null | grep -q ':{request.port} ' || lsof -ti:{request.port} >/dev/null 2>&1"
+                exec_result = ssh_manager.execute_command(port_check_cmd)
+                if exec_result.get("success") or exec_result.get("exit_status") == 0:
+                    test_results["port_check"] = "✅ 端口已监听"
+                else:
+                    test_results["port_check"] = "❌ 端口未监听"
+                    errors.append(f"端口 {request.port} 未监听")
+            except Exception as e:
+                test_results["port_check"] = f"⚠️ 端口检查失败: {str(e)}"
+                errors.append(f"端口检查异常: {str(e)}")
+        
+        # 2. 进程检查
+        if request.check_command:
+            try:
+                exec_result = ssh_manager.execute_command(f"cd {project_path} && {request.check_command}")
+                output = exec_result.get("stdout", "") + exec_result.get("stderr", "")
+                if "NOT_RUNNING" in output or exec_result.get("exit_status") != 0:
+                    test_results["process_check"] = "❌ 进程未运行"
+                    errors.append("进程检查失败")
+                else:
+                    test_results["process_check"] = "✅ 进程运行中"
+            except Exception as e:
+                test_results["process_check"] = f"⚠️ 进程检查失败: {str(e)}"
+                errors.append(f"进程检查异常: {str(e)}")
+        
+        # 3. HTTP健康检查
+        if request.health_check_url:
+            try:
+                # 通过SSH在远程服务器上执行curl
+                health_check_cmd = f"curl -s -o /dev/null -w '%{{http_code}}' '{request.health_check_url}' 2>&1 || echo '000'"
+                exec_result = ssh_manager.execute_command(health_check_cmd)
+                http_code = exec_result.get("stdout", "").strip()
+                
+                if http_code and http_code.isdigit():
+                    code = int(http_code)
+                    if 200 <= code < 400:
+                        test_results["http_check"] = f"✅ HTTP {code} (正常)"
+                    elif code == 404:
+                        test_results["http_check"] = f"⚠️ HTTP {code} (页面不存在，但服务可能运行)"
+                    else:
+                        test_results["http_check"] = f"❌ HTTP {code} (异常)"
+                        errors.append(f"HTTP状态码异常: {code}")
+                else:
+                    test_results["http_check"] = "❌ HTTP请求失败"
+                    errors.append("HTTP请求失败")
+            except Exception as e:
+                test_results["http_check"] = f"⚠️ HTTP检查失败: {str(e)}"
+                errors.append(f"HTTP检查异常: {str(e)}")
+        
+        ssh_manager.close()
+        
+        success = len(errors) == 0
+        return {
+            "success": success,
+            "service_id": request.service_id,
+            "test_results": test_results,
+            "error": "; ".join(errors) if errors else None,
+            "details": " | ".join([v for v in test_results.values() if v])
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Error testing service connectivity: {e}")
+        print(f"Traceback: {error_trace}")
+        raise HTTPException(status_code=500, detail=f"连通性测试失败: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

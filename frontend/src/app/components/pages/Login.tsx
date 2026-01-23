@@ -24,8 +24,16 @@ export function Login({ onLogin }: LoginProps) {
       onLogin();
     } catch (error: any) {
       console.error(error);
-      const msg = error.response?.data?.detail || error.response?.data?.msg || "登录失败，请检查用户名或密码";
-      toast.error(msg);
+      // 检查是否是网络错误或后端不可用
+      if (error.code === 'ERR_NETWORK' || error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
+        toast.error("无法连接到后端服务，请确保后端服务已启动", {
+          description: "请在终端执行: bash start.sh",
+          duration: 5000,
+        });
+      } else {
+        const msg = error.response?.data?.detail || error.response?.data?.msg || "登录失败，请检查用户名或密码";
+        toast.error(msg);
+      }
     } finally {
       setLoading(false);
     }
@@ -35,8 +43,8 @@ export function Login({ onLogin }: LoginProps) {
     <div className="flex items-center justify-center min-h-screen bg-slate-100">
       <Card className="w-[350px]">
         <CardHeader>
-          <CardTitle>登录</CardTitle>
-          <CardDescription>请输入您的账号密码</CardDescription>
+          <CardTitle>MetaSeekOJ 运维仪表盘</CardTitle>
+          <CardDescription>请输入您的账号密码登录</CardDescription>
         </CardHeader>
         <form onSubmit={handleSubmit}>
           <CardContent>

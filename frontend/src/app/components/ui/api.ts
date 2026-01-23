@@ -20,19 +20,52 @@ export async function fetchStatus(serverId?: string) {
     : `${API_BASE_URL}/status`;
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error('Network response was not ok');
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
   }
-  return response.json();
+  const text = await response.text();
+  if (!text || text.trim() === '') {
+    throw new Error('服务器返回空响应');
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error('JSON解析失败:', text);
+    throw new Error(`JSON解析失败: ${e}`);
+  }
 }
 
 export async function fetchServers() {
   const response = await fetch(`${API_BASE_URL}/servers`);
-  return response.json();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+  const text = await response.text();
+  if (!text || text.trim() === '') {
+    throw new Error('服务器返回空响应');
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error('JSON解析失败:', text);
+    throw new Error(`JSON解析失败: ${e}`);
+  }
 }
 
 export async function fetchConfig() {
   const response = await fetch(`${API_BASE_URL}/config`);
-  return response.json();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+  const text = await response.text();
+  if (!text || text.trim() === '') {
+    return {}; // config可能为空，返回空对象
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error('JSON解析失败:', text);
+    throw new Error(`JSON解析失败: ${e}`);
+  }
 }
 
 export async function saveServerConfig(config: any) {

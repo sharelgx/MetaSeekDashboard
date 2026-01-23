@@ -1,6 +1,14 @@
 #!/bin/bash
 # PostgreSQL 数据库初始化脚本
 
+# Sudo密码（用于自动执行sudo命令）
+SUDO_PASSWORD="123456"
+
+# Sudo命令包装函数
+sudo_cmd() {
+    echo "$SUDO_PASSWORD" | sudo -S "$@" 2>/dev/null
+}
+
 echo "=========================================="
 echo "PostgreSQL 数据库初始化脚本"
 echo "=========================================="
@@ -15,9 +23,8 @@ else
     echo "   请执行以下命令启动服务:"
     echo "   sudo service postgresql start"
     echo ""
-    read -p "   是否现在启动 PostgreSQL? (y/n): " answer
-    if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
-        sudo service postgresql start
+    echo "   正在自动启动 PostgreSQL..."
+    if sudo_cmd service postgresql start; then
         sleep 2
         if pg_isready -h localhost -p 5432 > /dev/null 2>&1; then
             echo "   ✅ PostgreSQL 已启动"
@@ -26,19 +33,19 @@ else
             exit 1
         fi
     else
-        echo "   请手动启动 PostgreSQL 后重新运行此脚本"
+        echo "   ❌ PostgreSQL 启动失败，请手动启动"
         exit 1
     fi
 fi
 
 echo ""
 echo "2. 检查数据库是否存在..."
-DB_EXISTS=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='opsdashboard'" 2>/dev/null)
+DB_EXISTS=$(sudo_cmd -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='opsdashboard'" 2>/dev/null)
 if [ "$DB_EXISTS" = "1" ]; then
     echo "   ✅ 数据库 'opsdashboard' 已存在"
 else
     echo "   ⚠️  数据库 'opsdashboard' 不存在，正在创建..."
-    sudo -u postgres psql -c "CREATE DATABASE opsdashboard;" 2>/dev/null
+    sudo_cmd -u postgres psql -c "CREATE DATABASE opsdashboard;" 2>/dev/null
     if [ $? -eq 0 ]; then
         echo "   ✅ 数据库创建成功"
     else

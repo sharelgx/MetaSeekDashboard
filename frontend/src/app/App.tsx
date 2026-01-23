@@ -16,28 +16,81 @@ export default function App() {
     !!localStorage.getItem('isLoggedIn')
   );
   const [authLoading, setAuthLoading] = useState(true);
+  const [isBackendAvailable, setIsBackendAvailable] = useState<boolean | null>(null);
 
   useEffect(() => {
-    const checkAuth = async () => {
+    let isMounted = true;
+    
+    // 检查后端服务是否可用并验证认证
+    const checkBackend = async () => {
       try {
-        await api.get('/profile');
-        setIsAuthenticated(true);
-        localStorage.setItem('isLoggedIn', 'true');
-      } catch (error) {
-        setIsAuthenticated(false);
-        localStorage.removeItem('isLoggedIn');
-      } finally {
-        setAuthLoading(false);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 1500); // 1.5秒超时
+        
+        const response = await fetch('http://localhost:8000/', {
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!isMounted) return;
+        
+        if (response.ok) {
+          setIsBackendAvailable(true);
+          // 后端可用后检查认证
+          try {
+            await api.get('/profile');
+            if (isMounted) {
+              setIsAuthenticated(true);
+              localStorage.setItem('isLoggedIn', 'true');
+            }
+          } catch (error) {
+            if (isMounted) {
+              setIsAuthenticated(false);
+              localStorage.removeItem('isLoggedIn');
+            }
+          } finally {
+            if (isMounted) {
+              setAuthLoading(false);
+            }
+          }
+        } else {
+          if (isMounted) {
+            setIsBackendAvailable(false);
+            setAuthLoading(false);
+          }
+        }
+      } catch (error: any) {
+        // 后端不可用（超时、网络错误等）- 静默处理，直接显示登录页面
+        if (isMounted) {
+          setIsBackendAvailable(false);
+          setAuthLoading(false);
+        }
       }
     };
-    checkAuth();
+
+    // 立即检查
+    checkBackend();
+    
+    // 如果2秒后还没检测到，设置超时状态（直接显示登录页面）
+    const timeout = setTimeout(() => {
+      if (isMounted && isBackendAvailable === null) {
+        setIsBackendAvailable(false);
+        setAuthLoading(false);
+      }
+    }, 2000);
 
     const handleLogoutEvent = () => {
       setIsAuthenticated(false);
       localStorage.removeItem('isLoggedIn');
     };
     window.addEventListener('auth-logout', handleLogoutEvent);
-    return () => window.removeEventListener('auth-logout', handleLogoutEvent);
+    
+    return () => {
+      isMounted = false;
+      clearTimeout(timeout);
+      window.removeEventListener('auth-logout', handleLogoutEvent);
+    };
   }, []);
 
   const handleLogin = () => {
@@ -73,10 +126,19 @@ export default function App() {
     }
   };
 
-  if (authLoading) {
-    return <div className="flex h-screen items-center justify-center">Loading...</div>;
+  // 如果还在检查后端状态，显示加载中
+  if (isBackendAvailable === null || authLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-slate-50">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+          <p className="text-slate-600">正在加载...</p>
+        </div>
+      </div>
+    );
   }
 
+  // 如果未认证，直接显示登录页面（无论后端是否可用）
   if (!isAuthenticated) {
     return (
         <>

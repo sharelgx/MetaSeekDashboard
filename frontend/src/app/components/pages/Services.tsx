@@ -3,8 +3,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/app
 import { Button } from '@/app/components/ui/button';
 import { StatusBadge, ServiceStatus } from '@/app/components/StatusBadge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/app/components/ui/select';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/app/components/ui/alert-dialog';
 import { toast } from 'sonner';
-import { RotateCw, Square, Activity, Loader2, Play, Database, Package, Server, RefreshCw } from 'lucide-react';
+import { RotateCw, Square, Activity, Loader2, Play, Database, Package, Server, RefreshCw, Network, AlertTriangle } from 'lucide-react';
 import { fetchServers, switchServer, serviceOperation } from '@/app/components/ui/api';
 
 // 根据启动脚本写死的服务列表
@@ -17,6 +18,7 @@ interface ServiceItem {
   checkCommand: string;
   startCommand: string;
   stopCommand: string;
+  healthCheckUrl?: string; // 健康检查URL
   status: ServiceStatus;
   loading?: boolean;
 }
@@ -30,41 +32,98 @@ interface ServerConfig {
   start_script?: string;
 }
 
-// 系统依赖（从启动脚本提取）
+// 系统依赖（从start_dev.sh提取）
+// 注意：监控项目现在使用SQLite数据库，不再需要管理PostgreSQL
+// PostgreSQL仅用于MetaSeekOJ项目，不在监控范围内
 const dependencies: Omit<ServiceItem, 'status' | 'loading'>[] = [
-  {
-    id: 'postgresql',
-    name: 'PostgreSQL',
-    description: '数据库服务',
-    type: 'dependency',
-    port: 5432,
-    checkCommand: 'pg_isready -h localhost -p 5432',
-    startCommand: 'sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start',
-    stopCommand: 'sudo service postgresql stop',
-  },
+  // PostgreSQL已移除 - 监控项目使用SQLite，完全独立于MetaSeekOJ的PostgreSQL
 ];
 
-// 应用服务（从启动脚本提取）
+// 应用服务（从start_dev.sh提取）
 const services: Omit<ServiceItem, 'status' | 'loading'>[] = [
   {
     id: 'backend',
-    name: 'Backend',
-    description: 'FastAPI 后端服务',
+    name: 'Django Backend',
+    description: 'Django 后端服务 (API)',
     type: 'service',
-    port: 8000,
-    checkCommand: 'ps aux | grep -E "python3.*main.py" | grep -v grep || echo "NOT_RUNNING"',
-    startCommand: 'cd backend && nohup python3 main.py > /tmp/opsdashboard_backend.log 2>&1 &',
-    stopCommand: 'pkill -f "python3.*main.py"',
+    port: 8086,
+    checkCommand: 'ps aux | grep -E "python.*manage.py runserver.*8086" | grep -v grep | grep -v "python3 main.py" || echo "NOT_RUNNING"',
+    startCommand: 'cd OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 &',
+    stopCommand: 'pkill -f "python.*manage.py runserver.*8086"',
+    healthCheckUrl: 'http://localhost:8086/api/admin/info/',
   },
   {
-    id: 'frontend',
-    name: 'Frontend',
-    description: 'Vite 前端服务',
+    id: 'dramatiq',
+    name: 'Dramatiq Worker',
+    description: '判题任务队列服务',
     type: 'service',
-    port: 5173,
-    checkCommand: 'ps aux | grep -E "vite|npm.*dev" | grep -v grep || echo "NOT_RUNNING"',
-    startCommand: 'cd frontend && nohup npm run dev > /tmp/opsdashboard_frontend.log 2>&1 &',
-    stopCommand: 'pkill -f "vite|npm.*dev"',
+    checkCommand: 'ps aux | grep -E "start_dramatiq_worker\\.py|manage\\.py rundramatiq|dramatiq.*judge\\.tasks" | grep -v grep || echo "NOT_RUNNING"',
+    startCommand: 'cd OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 &',
+    stopCommand: 'pkill -f "start_dramatiq_worker\\.py|manage\\.py rundramatiq|dramatiq.*judge\\.tasks"',
+  },
+  {
+    id: 'heartbeat',
+    name: 'Heartbeat Monitor',
+    description: '判题机心跳监控服务',
+    type: 'service',
+    checkCommand: 'ps aux | grep -E "heartbeat_metaseek_judge\\.py" | grep -v grep || echo "NOT_RUNNING"',
+    startCommand: 'cd OnlineJudge && TOKEN=$(python -c "import os,django;os.environ.setdefault(\'DJANGO_SETTINGS_MODULE\',\'oj.settings\');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 &',
+    stopCommand: 'pkill -f "heartbeat_metaseek_judge\\.py"',
+  },
+  {
+    id: 'vue_frontend',
+    name: 'Vue Frontend',
+    description: 'Vue.js 前端服务',
+    type: 'service',
+    port: 8081,
+    checkCommand: 'ps aux | grep -E "vue|webpack.*8081" | grep -v grep || echo "NOT_RUNNING"',
+    startCommand: 'cd OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 &',
+    stopCommand: 'pkill -f "vue|webpack.*8081"',
+    healthCheckUrl: 'http://localhost:8081',
+  },
+  {
+    id: 'react_classroom',
+    name: 'React Classroom',
+    description: 'React 主站前端 (8080端口)',
+    type: 'service',
+    port: 8080,
+    checkCommand: 'ps aux | grep -E "vite.*8080|npm run dev.*--port 8080" | grep -v grep || echo "NOT_RUNNING"',
+    startCommand: 'cd OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 &',
+    stopCommand: 'pkill -f "vite.*8080|npm run dev.*--port 8080"',
+    healthCheckUrl: 'http://localhost:8080',
+  },
+  {
+    id: 'scratch_editor',
+    name: 'Scratch Editor',
+    description: 'Scratch 编辑器内核',
+    type: 'service',
+    port: 8601,
+    checkCommand: 'ps aux | grep -E "scratch.*8601|webpack.*8601" | grep -v grep || echo "NOT_RUNNING"',
+    startCommand: 'cd scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 &',
+    stopCommand: 'pkill -f "scratch.*8601|webpack.*8601"',
+    healthCheckUrl: 'http://localhost:8601',
+  },
+  {
+    id: 'scratch_runner',
+    name: 'Scratch Runner',
+    description: 'Scratch 运行服务',
+    type: 'service',
+    port: 3002,
+    checkCommand: 'if lsof -i:3002 >/dev/null 2>&1; then echo "RUNNING"; elif [ -n "$(ps aux | grep -E \"node.*server\\.js.*3002|scratch-runner.*3002|PORT=3002\" | grep -v grep | grep -v cursor | head -1)" ]; then echo "RUNNING"; else echo "NOT_RUNNING"; fi',
+    startCommand: 'cd scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 &',
+    stopCommand: 'pkill -f "scratch-runner|node.*server\\.js.*3002"',
+    healthCheckUrl: 'http://localhost:3002/health',
+  },
+  {
+    id: 'judge_server',
+    name: 'Judge Server',
+    description: '判题服务器 (Docker)',
+    type: 'service',
+    port: 12360,
+    checkCommand: 'docker ps | grep -E "judge|metaseek-judge" || echo "NOT_RUNNING"',
+    startCommand: 'docker start metaseek-judge-dev || docker run -d --name metaseek-judge-dev ...',
+    stopCommand: 'docker stop metaseek-judge-dev',
+    healthCheckUrl: 'http://localhost:12360/ping',
   },
 ];
 
@@ -75,6 +134,12 @@ export function Services() {
   const [dependencyList, setDependencyList] = useState<ServiceItem[]>([]);
   const [loadingOperations, setLoadingOperations] = useState<Record<string, string>>({});
   const [loadingServers, setLoadingServers] = useState(false);
+  const [testingConnectivity, setTestingConnectivity] = useState<Record<string, boolean>>({});
+  const [confirmDialog, setConfirmDialog] = useState<{open: boolean, serviceId: string, operation: 'start' | 'stop' | 'restart' | null}>({
+    open: false,
+    serviceId: '',
+    operation: null
+  });
 
   // 加载服务器列表
   useEffect(() => {
@@ -183,10 +248,76 @@ export function Services() {
     }
   };
 
+  // 测试服务连通性
+  const testServiceConnectivity = async (serviceId: string) => {
+    if (!currentServerId) {
+      toast.error('请先选择服务器');
+      return;
+    }
+
+    const item = [...serviceList, ...dependencyList].find(s => s.id === serviceId);
+    if (!item) {
+      toast.error('服务不存在');
+      return;
+    }
+
+    setTestingConnectivity(prev => ({ ...prev, [serviceId]: true }));
+
+    try {
+      const response = await fetch('/api/services/test-connectivity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          server_id: currentServerId,
+          service_id: serviceId,
+          port: item.port,
+          health_check_url: item.healthCheckUrl,
+          check_command: item.checkCommand,
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (result.success) {
+        const details = [];
+        if (result.port_check) details.push(`端口检查: ${result.port_check}`);
+        if (result.process_check) details.push(`进程检查: ${result.process_check}`);
+        if (result.http_check) details.push(`HTTP检查: ${result.http_check}`);
+        
+        toast.success(`${item.name} 连通性测试成功`, {
+          description: details.join(', '),
+          duration: 5000,
+        });
+      } else {
+        toast.error(`${item.name} 连通性测试失败: ${result.error || '未知错误'}`, {
+          description: result.details || '',
+          duration: 5000,
+        });
+      }
+    } catch (error: any) {
+      toast.error(`连通性测试失败: ${error.message}`);
+    } finally {
+      setTestingConnectivity(prev => {
+        const newState = { ...prev };
+        delete newState[serviceId];
+        return newState;
+      });
+    }
+  };
+
   // 更新服务状态
   const updateServiceStatus = (serviceId: string, status: ServiceStatus) => {
     setServiceList(prev => prev.map(s => s.id === serviceId ? { ...s, status } : s));
     setDependencyList(prev => prev.map(d => d.id === serviceId ? { ...d, status } : d));
+  };
+
+  // 检查是否需要确认对话框（对于共享服务如PostgreSQL）
+  const needsConfirmation = (serviceId: string, operation: 'start' | 'stop' | 'restart'): boolean => {
+    // PostgreSQL是共享服务，停止/重启会影响所有使用该数据库的项目
+    if (serviceId === 'postgresql' && (operation === 'stop' || operation === 'restart')) {
+      return true;
+    }
+    return false;
   };
 
   // 服务操作
@@ -206,6 +337,27 @@ export function Services() {
       await checkServiceStatus(serviceId);
       return;
     }
+
+    // 对于需要确认的操作，显示确认对话框
+    if (needsConfirmation(serviceId, operation)) {
+      setConfirmDialog({
+        open: true,
+        serviceId,
+        operation
+      });
+      return;
+    }
+
+    // 直接执行操作
+    await executeServiceOperation(serviceId, operation);
+  };
+
+  // 执行服务操作
+  const executeServiceOperation = async (serviceId: string, operation: 'start' | 'stop' | 'restart') => {
+    if (!currentServerId) return;
+
+    const item = [...serviceList, ...dependencyList].find(s => s.id === serviceId);
+    if (!item) return;
 
     const operationKey = `${serviceId}-${operation}`;
     setLoadingOperations(prev => ({ ...prev, [operationKey]: operation }));
@@ -250,6 +402,7 @@ export function Services() {
     const isLoading = Object.keys(loadingOperations).some(key => 
       key.startsWith(`${service.id}-`)
     );
+    const isTesting = testingConnectivity[service.id] || false;
 
     return (
       <div className="flex items-center justify-between p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">
@@ -283,6 +436,22 @@ export function Services() {
             )}
             健康检查
           </Button>
+
+          {service.port && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => testServiceConnectivity(service.id)}
+              disabled={isTesting}
+            >
+              {isTesting ? (
+                <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+              ) : (
+                <Network className="w-4 h-4 mr-1.5" />
+              )}
+              连通性测试
+            </Button>
+          )}
           
           <Button
             variant="outline"
@@ -439,7 +608,7 @@ export function Services() {
                   <Package className="w-5 h-5" />
                   应用服务
                 </CardTitle>
-                <CardDescription>Backend、Frontend 等应用服务</CardDescription>
+                <CardDescription>Backend、Frontend、Judge 等应用服务</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
                 {serviceList.map(service => (

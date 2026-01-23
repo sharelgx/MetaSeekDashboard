@@ -94,4 +94,5 @@ backend/start_backend.sh
 backend/start_postgresql.sh
 backend/setup_database.sh
 backend/diagnose_database.sh
+startup-server.js
 nul
