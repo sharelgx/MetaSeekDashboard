@@ -207,3 +207,35 @@ export async function serviceOperation(
   
   return response.json();
 }
+
+// 本地服务状态检查（用于 localhost 模式）
+export async function localServiceStatus(serviceId: string, checkCommand: string, port?: number) {
+  const response = await fetch(`${API_BASE_URL}/services/local/status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ service_id: serviceId, check_command: checkCommand, port }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  }
+  return data;
+}
+
+// 本地服务操作（启动、停止、重启，用于 localhost 模式）
+export async function localServiceOperation(
+  serviceId: string,
+  operation: 'start' | 'stop' | 'restart',
+  command?: string
+) {
+  const response = await fetch(`${API_BASE_URL}/services/local/operation`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ service_id: serviceId, operation, command: command || '' }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  }
+  return data;
+}

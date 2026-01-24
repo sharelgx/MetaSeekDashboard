@@ -1517,33 +1517,20 @@ async def local_service_operation(request: LocalServiceOperationRequest):
                 # 使用传入的命令（兼容旧版本）
                 full_command = command
             
-            # 使用nohup在后台执行
-            process = subprocess.Popen(
+            # nohup ... & 会立即返回，shell 退出；用 run 判定执行成功即可
+            result = subprocess.run(
                 full_command,
                 shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
-            
-            # 等待一下看是否启动成功
-            import time
-            time.sleep(2)
-            
-            # 检查进程是否还在运行
-            if process.poll() is None:
-                return {
-                    "success": True,
-                    "message": f"{service_id} 启动命令已执行",
-                    "pid": process.pid
-                }
-            else:
-                # 进程已退出，可能启动失败
-                stdout, stderr = process.communicate()
-                return {
-                    "success": False,
-                    "error": f"启动失败: {stderr.decode() if stderr else stdout.decode()}"
-                }
+            if result.returncode == 0:
+                return {"success": True, "message": f"{service_id} 启动命令已执行"}
+            return {
+                "success": False,
+                "error": f"启动失败: {(result.stderr or result.stdout or '').strip() or '未知错误'}"
+            }
         
         elif operation == "stop":
             # 停止服务：直接执行停止命令
@@ -1584,17 +1571,16 @@ async def local_service_operation(request: LocalServiceOperationRequest):
                 text=True,
                 timeout=10
             )
-            
-            if result.returncode == 0:
-                return {
-                    "success": True,
-                    "message": f"{service_id} 已停止"
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": result.stderr or result.stdout or "停止失败"
-                }
+            # pkill 无匹配返回 1；docker 等可能其他码。停止意图已执行即视为成功
+            is_pkill = "pkill" in full_command
+            if result.returncode == 0 or (is_pkill and result.returncode == 1):
+                return {"success": True, "message": f"{service_id} 已停止"}
+            if is_pkill:
+                return {"success": True, "message": f"{service_id} 已停止（无运行中进程）"}
+            return {
+                "success": False,
+                "error": result.stderr or result.stdout or "停止失败"
+            }
         
         elif operation == "restart":
             # 重启服务：先停止再启动
@@ -1649,28 +1635,19 @@ async def local_service_operation(request: LocalServiceOperationRequest):
                 # 使用传入的命令（兼容旧版本）
                 start_cmd = command.split(';')[1].strip() if ';' in command else command
             
-            process = subprocess.Popen(
+            start_result = subprocess.run(
                 start_cmd,
                 shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
-            
-            time.sleep(2)
-            
-            if process.poll() is None:
-                return {
-                    "success": True,
-                    "message": f"{service_id} 重启成功",
-                    "pid": process.pid
-                }
-            else:
-                stdout, stderr = process.communicate()
-                return {
-                    "success": False,
-                    "error": f"重启失败: {stderr.decode() if stderr else stdout.decode()}"
-                }
+            if start_result.returncode == 0:
+                return {"success": True, "message": f"{service_id} 重启成功"}
+            return {
+                "success": False,
+                "error": f"重启失败: {(start_result.stderr or start_result.stdout or '').strip() or '未知错误'}"
+            }
         
         else:
             return {

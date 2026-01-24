@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/app/components/ui/alert-dialog';
 import { toast } from 'sonner';
 import { RotateCw, Square, Activity, Loader2, Play, Database, Package, Server, RefreshCw, Network, AlertTriangle } from 'lucide-react';
-import { fetchServers, switchServer, serviceOperation } from '@/app/components/ui/api';
+import { fetchServers, switchServer, serviceOperation, localServiceStatus, localServiceOperation } from '@/app/components/ui/api';
 
 // 根据启动脚本写死的服务列表
 interface ServiceItem {
@@ -32,11 +32,29 @@ interface ServerConfig {
   start_script?: string;
 }
 
+const LOCAL_SERVER_ID = 'local';
+const LOCAL_SERVER: ServerConfig = {
+  server_id: LOCAL_SERVER_ID,
+  name: '本地 (localhost)',
+  host: '127.0.0.1',
+  user: '-',
+  project_path: '本地 8080 项目',
+};
+
 // 系统依赖（从start_dev.sh提取）
-// 注意：监控项目现在使用SQLite数据库，不再需要管理PostgreSQL
-// PostgreSQL仅用于MetaSeekOJ项目，不在监控范围内
+// 注意：监控项目现在使用SQLite数据库，完全独立于MetaSeekOJ的PostgreSQL
+// 但MetaSeekOJ项目仍使用PostgreSQL，需要监测其状态
 const dependencies: Omit<ServiceItem, 'status' | 'loading'>[] = [
-  // PostgreSQL已移除 - 监控项目使用SQLite，完全独立于MetaSeekOJ的PostgreSQL
+  {
+    id: 'postgresql',
+    name: 'PostgreSQL (MetaSeekOJ)',
+    description: 'MetaSeekOJ项目的PostgreSQL数据库服务 (端口5432)',
+    type: 'dependency',
+    port: 5432,
+    checkCommand: 'pg_isready -h localhost -p 5432 || echo "NOT_RUNNING"',
+    startCommand: 'sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start',
+    stopCommand: 'sudo service postgresql stop || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main stop',
+  },
 ];
 
 // 应用服务（从start_dev.sh提取）
@@ -156,19 +174,19 @@ export function Services() {
   const loadServers = async () => {
     try {
       const response = await fetchServers();
-      if (response && response.servers) {
-        setServers(response.servers);
-        
-        // 如果有服务器且未选择，选择第一个
-        const serverIds = Object.keys(response.servers);
-        if (serverIds.length > 0 && !currentServerId) {
-          setCurrentServerId(serverIds[0]);
-          await handleSwitchServer(serverIds[0]);
-        }
+      const remote = (response && response.servers) ? response.servers : {};
+      const withLocal = { [LOCAL_SERVER_ID]: LOCAL_SERVER, ...remote };
+      setServers(withLocal);
+
+      if (!currentServerId) {
+        setCurrentServerId(LOCAL_SERVER_ID);
+        await handleSwitchServer(LOCAL_SERVER_ID);
       }
     } catch (error) {
       console.error('加载服务器列表失败:', error);
       toast.error('加载服务器列表失败');
+      setServers({ [LOCAL_SERVER_ID]: LOCAL_SERVER });
+      if (!currentServerId) setCurrentServerId(LOCAL_SERVER_ID);
     }
   };
 
@@ -198,9 +216,11 @@ export function Services() {
 
     setLoadingServers(true);
     try {
-      await switchServer(serverId);
+      if (serverId !== LOCAL_SERVER_ID) {
+        await switchServer(serverId);
+      }
       setCurrentServerId(serverId);
-      toast.success(`已切换到服务器: ${servers[serverId]?.name || serverId}`);
+      toast.success(`已切换到: ${servers[serverId]?.name ?? (serverId === LOCAL_SERVER_ID ? LOCAL_SERVER.name : serverId)}`);
       initServices();
     } catch (error: any) {
       toast.error(`切换服务器失败: ${error.message}`);
@@ -226,15 +246,14 @@ export function Services() {
     setLoadingOperations(prev => ({ ...prev, [`${serviceId}-status`]: 'checking' }));
 
     try {
-      // 使用SSH执行检查命令
-      const result = await serviceOperation(
-        currentServerId,
-        item.name,
-        'status'
-      );
-      
-      const status: ServiceStatus = result.status === 'running' ? 'running' : 
-                                   result.status === 'stopped' ? 'stopped' : 'error';
+      let status: ServiceStatus = 'error';
+      if (currentServerId === LOCAL_SERVER_ID) {
+        const result = await localServiceStatus(item.id, item.checkCommand, item.port);
+        status = result.status === 'running' ? 'running' : result.status === 'stopped' ? 'stopped' : 'error';
+      } else {
+        const result = await serviceOperation(currentServerId, item.name, 'status');
+        status = result.status === 'running' ? 'running' : result.status === 'stopped' ? 'stopped' : 'error';
+      }
       updateServiceStatus(serviceId, status);
     } catch (error) {
       console.error('检查服务状态失败:', error);
@@ -363,27 +382,17 @@ export function Services() {
     setLoadingOperations(prev => ({ ...prev, [operationKey]: operation }));
 
     try {
-      // 使用SSH执行操作
-      const result = await serviceOperation(
-        currentServerId,
-        item.name,
-        operation
-      );
+      let result: { success: boolean; error?: string };
+      if (currentServerId === LOCAL_SERVER_ID) {
+        result = await localServiceOperation(item.id, operation);
+      } else {
+        result = await serviceOperation(currentServerId, item.name, operation);
+      }
       
       if (result.success) {
-        const operationNames = {
-          start: '启动',
-          stop: '停止',
-          restart: '重启',
-          status: '检查状态',
-        };
-        
+        const operationNames = { start: '启动', stop: '停止', restart: '重启' };
         toast.success(`${item.name} ${operationNames[operation]}成功`);
-        
-        // 操作后等待一下再检查状态
-        setTimeout(() => {
-          checkServiceStatus(serviceId);
-        }, 2000);
+        setTimeout(() => checkServiceStatus(serviceId), 2000);
       } else {
         toast.error(`${item.name} ${operation}失败: ${result.error || '未知错误'}`);
       }
@@ -437,7 +446,7 @@ export function Services() {
             健康检查
           </Button>
 
-          {service.port && (
+          {service.port && currentServerId !== LOCAL_SERVER_ID && (
             <Button
               variant="outline"
               size="sm"

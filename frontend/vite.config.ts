@@ -15,6 +15,13 @@ export default defineConfig({
             target: 'http://localhost:8000',
             changeOrigin: true,
             secure: false,
+        },
+        // Proxy React template admin to Django admin (8086 -> 8080/react/admin)
+        '/react/admin': {
+            target: 'http://localhost:8086',
+            changeOrigin: true,
+            secure: false,
+            rewrite: (path) => path.replace(/^\/react\/admin/, '/admin'),
         }
     }
   },
