@@ -1372,14 +1372,52 @@ class LocalServiceOperationRequest(BaseModel):
     operation: str  # "start", "stop", "restart"
     command: str
 
+
+def _run_local_shell(cmd: str, timeout: int = 15, fire_and_forget: bool = False):
+    """在干净 shell 中执行本地命令，避免 .bashrc/nvm/.npmrc 等干扰。"""
+    wrapped = "unset NPM_CONFIG_PREFIX NPM_CONFIG_GLOBALCONFIG 2>/dev/null; " + cmd
+    if fire_and_forget:
+        subprocess.Popen(
+            ["/bin/bash", "--noprofile", "--norc", "-c", wrapped],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return subprocess.CompletedProcess(
+            args=["/bin/bash", "-c", wrapped], returncode=0, stdout="", stderr=""
+        )
+    return subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", wrapped],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _clean_error_message(out: str, fallback: str) -> str:
+    """去掉 nvm/.npmrc 等噪音，避免当作操作失败原因展示给用户。"""
+    if not (out or "").strip():
+        return fallback
+    noise = (
+        "nvm",
+        ".npmrc",
+        "globalconfig",
+        "NPM_CONFIG",
+        "delete-prefix",
+        "incompatible with nvm",
+        "unset it",
+    )
+    lines = [l for l in (out or "").splitlines() if l.strip()]
+    kept = [l for l in lines if not any(n in l for n in noise)]
+    s = "\n".join(kept).strip()
+    return s if s else fallback
+
+
 @app.post("/api/services/local/status")
 async def local_service_status(request: LocalServiceStatusRequest):
     """
     检查本地服务状态
     """
-    import subprocess
-    import shlex
-    
     try:
         service_id = request.service_id
         check_command = request.check_command
@@ -1411,20 +1449,11 @@ async def local_service_status(request: LocalServiceStatusRequest):
             except:
                 pass
         
-        # 执行检查命令
+        # 执行检查命令（干净 shell，避免 nvm/.npmrc 干扰）
         if check_command:
             try:
-                # 使用shell执行命令
-                result = subprocess.run(
-                    check_command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                
-                # 根据命令输出判断状态
-                output = result.stdout + result.stderr
+                result = _run_local_shell(check_command, timeout=5)
+                output = (result.stdout or "") + (result.stderr or "")
                 if "NOT_RUNNING" in output or result.returncode != 0:
                     if status != "running":  # 如果端口检查也没通过
                         status = "stopped"
@@ -1465,9 +1494,6 @@ async def local_service_operation(request: LocalServiceOperationRequest):
     执行本地服务操作（启动、停止、重启）
     注意：此API只用于本地8080项目，不影响远程服务器
     """
-    import subprocess
-    import os
-    
     try:
         service_id = request.service_id
         operation = request.operation
@@ -1490,26 +1516,19 @@ async def local_service_operation(request: LocalServiceOperationRequest):
                 # PostgreSQL需要sudo
                 full_command = f"echo '123456' | sudo -S service postgresql start 2>/dev/null || (echo '123456' | sudo -S -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start 2>/dev/null || sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start)"
             elif "backend" in service_lower or "django" in service_lower:
-                # Django Backend (端口8086)
-                full_command = f"cd {local_project_root}/OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 &"
+                full_command = f"cd {local_project_root}/OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 & disown"
             elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
-                # Dramatiq Worker
-                full_command = f"cd {local_project_root}/OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 &"
+                full_command = f"cd {local_project_root}/OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 & disown"
             elif "heartbeat" in service_lower:
-                # Heartbeat Monitor
-                full_command = f"cd {local_project_root}/OnlineJudge && TOKEN=$(python -c \"import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','oj.settings');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)\") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 &"
+                full_command = f"cd {local_project_root}/OnlineJudge && TOKEN=$(python -c \"import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','oj.settings');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)\") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 & disown"
             elif "vue" in service_lower and "frontend" in service_lower:
-                # Vue Frontend (端口8081)
-                full_command = f"cd {local_project_root}/OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 &"
+                full_command = f"cd {local_project_root}/OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 & disown"
             elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
-                # React Classroom (端口8080) - 本地服务
-                full_command = f"cd {local_project_root}/OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 &"
+                full_command = f"cd {local_project_root}/OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 & disown"
             elif "scratch" in service_lower and "editor" in service_lower:
-                # Scratch Editor (端口8601)
-                full_command = f"cd {local_project_root}/scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 &"
+                full_command = f"cd {local_project_root}/scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 & disown"
             elif "scratch" in service_lower and "runner" in service_lower:
-                # Scratch Runner (端口3002)
-                full_command = f"cd {local_project_root}/scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 &"
+                full_command = f"cd {local_project_root}/scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 & disown"
             elif "judge" in service_lower and "server" in service_lower:
                 # Judge Server (Docker)
                 full_command = "docker start metaseek-judge-dev 2>/dev/null || (docker run -d --name metaseek-judge-dev -p 12360:12360 metaseek-judge:dev 2>&1 || echo 'DOCKER_NOT_FOUND')"
@@ -1517,20 +1536,16 @@ async def local_service_operation(request: LocalServiceOperationRequest):
                 # 使用传入的命令（兼容旧版本）
                 full_command = command
             
-            # nohup ... & 会立即返回，shell 退出；用 run 判定执行成功即可
-            result = subprocess.run(
-                full_command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
+            if "nohup" in full_command or "& disown" in full_command:
+                _run_local_shell(full_command, timeout=15, fire_and_forget=True)
+                return {"success": True, "message": f"{service_id} 启动命令已执行"}
+            result = _run_local_shell(full_command, timeout=15)
             if result.returncode == 0:
                 return {"success": True, "message": f"{service_id} 启动命令已执行"}
-            return {
-                "success": False,
-                "error": f"启动失败: {(result.stderr or result.stdout or '').strip() or '未知错误'}"
-            }
+            err = _clean_error_message(
+                (result.stderr or result.stdout or "").strip(), "未知错误"
+            )
+            return {"success": False, "error": f"启动失败: {err}"}
         
         elif operation == "stop":
             # 停止服务：直接执行停止命令
@@ -1564,23 +1579,16 @@ async def local_service_operation(request: LocalServiceOperationRequest):
                 # 使用传入的命令（兼容旧版本）
                 full_command = command
             
-            result = subprocess.run(
-                full_command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            # pkill 无匹配返回 1；docker 等可能其他码。停止意图已执行即视为成功
+            result = _run_local_shell(full_command, timeout=10)
             is_pkill = "pkill" in full_command
             if result.returncode == 0 or (is_pkill and result.returncode == 1):
                 return {"success": True, "message": f"{service_id} 已停止"}
             if is_pkill:
                 return {"success": True, "message": f"{service_id} 已停止（无运行中进程）"}
-            return {
-                "success": False,
-                "error": result.stderr or result.stdout or "停止失败"
-            }
+            err = _clean_error_message(
+                (result.stderr or result.stdout or "").strip(), "停止失败"
+            )
+            return {"success": False, "error": err}
         
         elif operation == "restart":
             # 重启服务：先停止再启动
@@ -1609,45 +1617,42 @@ async def local_service_operation(request: LocalServiceOperationRequest):
                 # 使用传入的命令（兼容旧版本）
                 stop_cmd = command.split(';')[0] if ';' in command else command
             
-            subprocess.run(stop_cmd, shell=True, capture_output=True, timeout=10)
+            _run_local_shell(stop_cmd, timeout=10)
             time.sleep(1)
             
             # 启动命令
             if "postgresql" in service_lower or "postgres" in service_lower:
                 start_cmd = "echo '123456' | sudo -S service postgresql start 2>/dev/null || (echo '123456' | sudo -S -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start 2>/dev/null || sudo service postgresql start || sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main start)"
             elif "backend" in service_lower or "django" in service_lower:
-                start_cmd = f"cd {local_project_root}/OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 &"
+                start_cmd = f"cd {local_project_root}/OnlineJudge && nohup python manage.py runserver 0.0.0.0:8086 >> /tmp/django.log 2>&1 & disown"
             elif "dramatiq" in service_lower or ("worker" in service_lower and "dramatiq" in service_lower):
-                start_cmd = f"cd {local_project_root}/OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 &"
+                start_cmd = f"cd {local_project_root}/OnlineJudge && nohup python start_dramatiq_worker.py >> /tmp/dramatiq.log 2>&1 & disown"
             elif "heartbeat" in service_lower:
-                start_cmd = f"cd {local_project_root}/OnlineJudge && TOKEN=$(python -c \"import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','oj.settings');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)\") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 &"
+                start_cmd = f"cd {local_project_root}/OnlineJudge && TOKEN=$(python -c \"import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','oj.settings');django.setup();from options.options import SysOptions;print(SysOptions.judge_server_token)\") && nohup python heartbeat_metaseek_judge.py >> /tmp/heartbeat.log 2>&1 & disown"
             elif "vue" in service_lower and "frontend" in service_lower:
-                start_cmd = f"cd {local_project_root}/OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 &"
+                start_cmd = f"cd {local_project_root}/OnlineJudgeFE-Vue && VUE_PORT=8081 nohup npm run dev >> /tmp/vue.log 2>&1 & disown"
             elif "react" in service_lower or ("classroom" in service_lower and "8080" in service_lower):
-                start_cmd = f"cd {local_project_root}/OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 &"
+                start_cmd = f"cd {local_project_root}/OnlineJudgeFE-React && nohup npm run dev -- --host 0.0.0.0 --port 8080 >> /tmp/react_classroom.log 2>&1 & disown"
             elif "scratch" in service_lower and "editor" in service_lower:
-                start_cmd = f"cd {local_project_root}/scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 &"
+                start_cmd = f"cd {local_project_root}/scratch-editor && PORT=8601 nohup ./start-editor.sh >> /tmp/scratch_editor.log 2>&1 & disown"
             elif "scratch" in service_lower and "runner" in service_lower:
-                start_cmd = f"cd {local_project_root}/scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 &"
+                start_cmd = f"cd {local_project_root}/scratch-runner && PORT=3002 nohup node server.js >> logs/scratch-runner.log 2>&1 & disown"
             elif "judge" in service_lower and "server" in service_lower:
                 start_cmd = "docker stop metaseek-judge-dev 2>/dev/null; sleep 1; docker start metaseek-judge-dev 2>/dev/null || (docker run -d --name metaseek-judge-dev -p 12360:12360 metaseek-judge:dev 2>&1 || echo 'DOCKER_NOT_FOUND')"
             else:
                 # 使用传入的命令（兼容旧版本）
                 start_cmd = command.split(';')[1].strip() if ';' in command else command
             
-            start_result = subprocess.run(
-                start_cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
+            if "nohup" in start_cmd or "& disown" in start_cmd:
+                _run_local_shell(start_cmd, timeout=15, fire_and_forget=True)
+                return {"success": True, "message": f"{service_id} 重启成功"}
+            start_result = _run_local_shell(start_cmd, timeout=15)
             if start_result.returncode == 0:
                 return {"success": True, "message": f"{service_id} 重启成功"}
-            return {
-                "success": False,
-                "error": f"重启失败: {(start_result.stderr or start_result.stdout or '').strip() or '未知错误'}"
-            }
+            err = _clean_error_message(
+                (start_result.stderr or start_result.stdout or "").strip(), "未知错误"
+            )
+            return {"success": False, "error": f"重启失败: {err}"}
         
         else:
             return {

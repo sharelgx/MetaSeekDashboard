@@ -229,15 +229,18 @@ export function Services() {
     }
   };
 
-  // 检查所有服务状态
+  // 检查所有服务状态（批量刷新不逐个 toast）
   const checkAllServicesStatus = async (items: ServiceItem[]) => {
     for (const item of items) {
-      await checkServiceStatus(item.id);
+      await checkServiceStatus(item.id, false);
+    }
+    if (items.length > 0) {
+      toast.success('已刷新所有服务状态', { description: `共 ${items.length} 个服务` });
     }
   };
 
-  // 检查单个服务状态
-  const checkServiceStatus = async (serviceId: string) => {
+  // 检查单个服务状态；showToast 为 true 时弹出健康检查结果
+  const checkServiceStatus = async (serviceId: string, showToast = true) => {
     if (!currentServerId) return;
     
     const item = [...serviceList, ...dependencyList].find(s => s.id === serviceId);
@@ -255,9 +258,14 @@ export function Services() {
         status = result.status === 'running' ? 'running' : result.status === 'stopped' ? 'stopped' : 'error';
       }
       updateServiceStatus(serviceId, status);
-    } catch (error) {
+      if (showToast) {
+        const statusText = status === 'running' ? '运行中' : status === 'stopped' ? '已停止' : '异常';
+        toast.success(`${item.name} 健康检查完成`, { description: `状态: ${statusText}` });
+      }
+    } catch (error: any) {
       console.error('检查服务状态失败:', error);
       updateServiceStatus(serviceId, 'error');
+      if (showToast) toast.error(`${item.name} 健康检查失败`, { description: error?.message || '未知错误' });
     } finally {
       setLoadingOperations(prev => {
         const newState = { ...prev };
@@ -332,11 +340,21 @@ export function Services() {
 
   // 检查是否需要确认对话框（对于共享服务如PostgreSQL）
   const needsConfirmation = (serviceId: string, operation: 'start' | 'stop' | 'restart'): boolean => {
-    // PostgreSQL是共享服务，停止/重启会影响所有使用该数据库的项目
     if (serviceId === 'postgresql' && (operation === 'stop' || operation === 'restart')) {
       return true;
     }
     return false;
+  };
+
+  const handleConfirmDialogConfirm = async () => {
+    const { serviceId, operation } = confirmDialog;
+    if (!serviceId || !operation) return;
+    setConfirmDialog({ open: false, serviceId: '', operation: null });
+    await executeServiceOperation(serviceId, operation);
+  };
+
+  const handleConfirmDialogCancel = () => {
+    setConfirmDialog({ open: false, serviceId: '', operation: null });
   };
 
   // 服务操作
@@ -392,7 +410,7 @@ export function Services() {
       if (result.success) {
         const operationNames = { start: '启动', stop: '停止', restart: '重启' };
         toast.success(`${item.name} ${operationNames[operation]}成功`);
-        setTimeout(() => checkServiceStatus(serviceId), 2000);
+        setTimeout(() => checkServiceStatus(serviceId, false), 2000);
       } else {
         toast.error(`${item.name} ${operation}失败: ${result.error || '未知错误'}`);
       }
@@ -628,6 +646,36 @@ export function Services() {
           )}
         </>
       )}
+
+      {/* PostgreSQL 等共享服务停止/重启确认对话框 */}
+      <AlertDialog open={confirmDialog.open} onOpenChange={(open) => !open && handleConfirmDialogCancel()}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-amber-500" />
+              确认操作
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmDialog.serviceId && (() => {
+                const it = [...serviceList, ...dependencyList].find(s => s.id === confirmDialog.serviceId);
+                const name = it?.name ?? confirmDialog.serviceId;
+                const op = confirmDialog.operation === 'stop' ? '停止' : '重启';
+                return (
+                  <>
+                    <strong>{name}</strong> 为共享服务，{op}将影响所有使用该服务的项目。是否继续？
+                  </>
+                );
+              })()}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={handleConfirmDialogCancel}>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={(e) => { e.preventDefault(); handleConfirmDialogConfirm(); }}>
+              {confirmDialog.operation === 'stop' ? '停止' : '重启'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
